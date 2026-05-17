@@ -1,0 +1,18 @@
+node_modules
+.next
+.env
+.env.local
+.env*.local
+*.log
+.DS_Store
+
+# Local daemon schedule store (slide payloads for launchd publish)
+.data/
+
+# Local sample videos (too large for git; keep your copy under fixtures/)
+fixtures/*.MOV
+fixtures/*.mov
+fixtures/*.mp4
+
+# TypeScript incremental build cache (regenerated on every build)
+tsconfig.tsbuildinfo

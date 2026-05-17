@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd: run Content Multiplier “publish due” every 5 minutes.
+  publish-due.sh loads SCHEDULE_DAEMON_SECRET from the project .env — do not embed secrets here.
+  Install: cp to ~/Library/LaunchAgents/ then launchctl load (see docs in repo).
+  Edit the script path below if this repo moves.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.videostudio.publish-due</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/sarawadework/Cursor/Video to scheduled post/scripts/publish-due.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/video-studio-publish-due.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/video-studio-publish-due.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --text: #1c1917;
+  --muted: #57534e;
+  --accent: #6e9f82;
+  --palette-sage: #7faf8f;
+  --palette-moss: #6e9f82;
+  --palette-teal: #6fa6a0;
+  --palette-depth: #5f8f95;
+  --palette-pale: #a9c3b5;
+
+  /* BuildDaily hub brand (marketing site alignment) */
+  --bd-ink: #1a1a1a;
+  --bd-paper: #faf8f4;
+  --bd-line: #e7e2d6;
+  --bd-green-50: #f1f7f3;
+  --bd-green-100: #dceadf;
+  --bd-green-200: #b8d2c0;
+  --bd-green-600: #588064;
+  --bd-green-700: #466852;
+  --bd-green-800: #34503e;
+}
+
+body {
+  color: var(--text);
+  background: linear-gradient(165deg, #fafaf9 0%, #f5f5f4 45%, #e7e5e4 100%);
+  min-height: 100vh;
+}

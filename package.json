@@ -1,0 +1,51 @@
+{
+  "name": "content-multiplier",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf .next",
+    "dev": "next dev",
+    "dashboard": "bash scripts/start-video-studio-dashboard.sh",
+    "publish-due": "bash scripts/publish-due.sh",
+    "dev:turbo": "next dev --turbo",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test:title-hooks": "npx tsx scripts/title-hook-impact.ts",
+    "test:copy-context-ab": "npx tsx scripts/copy-context-ab-test.ts",
+    "test:copy-context-ab-video": "npx tsx scripts/copy-context-ab-video-test.ts",
+    "test:default-caption-cta-append": "npx tsx scripts/default-caption-cta-append-test.ts",
+    "test:merge-short-editorial-brief": "npx tsx scripts/merge-short-editorial-brief-test.ts"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^7.3.3",
+    "@fontsource/anton": "^5.2.7",
+    "@fontsource/poppins": "^5.2.7",
+    "@napi-rs/canvas": "^0.1.65",
+    "@tensorflow-models/blazeface": "^0.1.0",
+    "@tensorflow/tfjs-backend-cpu": "^4.22.0",
+    "@tensorflow/tfjs-converter": "^4.22.0",
+    "@tensorflow/tfjs-core": "^4.22.0",
+    "busboy": "^1.6.0",
+    "jszip": "^3.10.1",
+    "next": "^15.1.0",
+    "openai": "^4.77.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tesseract.js": "^5.1.1",
+    "uuid": "^11.0.5"
+  },
+  "devDependencies": {
+    "@types/busboy": "^1.5.4",
+    "@types/jszip": "^3.4.0",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "^15.1.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2"
+  }
+}

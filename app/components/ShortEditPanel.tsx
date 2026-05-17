@@ -1,0 +1,237 @@
+"use client";
+
+import { useCallback, useEffect, useId, useState } from "react";
+import {
+  getShortEditorialNotesFromStorage,
+  setShortEditorialNotesToStorage,
+} from "@/lib/short-editorial-notes-storage";
+import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
+import {
+  getStudioShortPipelineSettingsFromStorage,
+  setStudioShortPipelineSettingsToStorage,
+  type ShortAudioMode,
+  type StudioShortPipelineSettings,
+} from "@/lib/studio-short-pipeline-settings";
+import type { StudioShortTextOptions } from "@/lib/run-video-to-short";
+
+type ShortEditPanelProps = {
+  shortJobId: string | null;
+  busy: boolean;
+  onReprocess: (opts: StudioShortTextOptions) => Promise<void>;
+};
+
+export function ShortEditPanel({
+  shortJobId,
+  busy,
+  onReprocess,
+}: ShortEditPanelProps) {
+  const hookId = useId();
+  const overlayId = useId();
+  const editorialId = useId();
+  const audioId = useId();
+
+  const [hookInstructions, setHookInstructions] = useState("");
+  const [hookOverlayText, setHookOverlayText] = useState("");
+  const [editorialNotes, setEditorialNotes] = useState("");
+  const [pipeline, setPipeline] = useState<StudioShortPipelineSettings>(() =>
+    getStudioShortPipelineSettingsFromStorage()
+  );
+
+  useEffect(() => {
+    setEditorialNotes(getShortEditorialNotesFromStorage());
+    setPipeline(getStudioShortPipelineSettingsFromStorage());
+  }, []);
+
+  const onEditorialNotesChange = useCallback((value: string) => {
+    const v = value.slice(0, MAX_CAROUSEL_FOCUS_CHARS);
+    setEditorialNotes(v);
+    setShortEditorialNotesToStorage(v);
+  }, []);
+
+  const updatePipeline = useCallback(
+    (patch: Partial<StudioShortPipelineSettings>) => {
+      setPipeline((prev) => {
+        const next: StudioShortPipelineSettings = {
+          ...prev,
+          ...patch,
+          reframe: patch.reframe
+            ? { ...prev.reframe, ...patch.reframe }
+            : prev.reframe,
+        };
+        setStudioShortPipelineSettingsToStorage(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  const handleReprocess = useCallback(async () => {
+    await onReprocess({
+      hook_instructions: hookInstructions.trim() || undefined,
+      hook_overlay_text: hookOverlayText.trim() || undefined,
+      editorial_notes: editorialNotes.trim() || undefined,
+      pipeline,
+    });
+  }, [
+    onReprocess,
+    hookInstructions,
+    hookOverlayText,
+    editorialNotes,
+    pipeline,
+  ]);
+
+  return (
+    <details className="rounded-lg border border-stone-300 bg-stone-50/90 shadow-sm [&>summary::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-sm font-semibold text-stone-900">
+        <span>Edit</span>
+        <span className="text-xs font-normal text-stone-500" aria-hidden>
+          ▾
+        </span>
+      </summary>
+      <div className="space-y-4 border-t border-stone-200 bg-white p-3">
+        <fieldset className="space-y-2.5" disabled={busy}>
+          <legend className="text-xs font-semibold uppercase tracking-wide text-stone-600">
+            Copy &amp; hook
+          </legend>
+          <label className="block" htmlFor={hookId}>
+            <span className="mb-1 block text-xs font-medium text-stone-700">
+              Hook instructions{" "}
+              <span className="font-normal text-stone-500">(optional)</span>
+            </span>
+            <textarea
+              id={hookId}
+              value={hookInstructions}
+              onChange={(e) => setHookInstructions(e.target.value)}
+              rows={2}
+              placeholder="Steer opening framing or hook tone…"
+              className="w-full resize-y rounded-md border border-stone-200 px-2 py-1.5 text-sm text-stone-900 placeholder:text-stone-400 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
+            />
+          </label>
+          <label className="block" htmlFor={overlayId}>
+            <span className="mb-1 block text-xs font-medium text-stone-700">
+              On-screen hook text{" "}
+              <span className="font-normal text-stone-500">(optional)</span>
+            </span>
+            <textarea
+              id={overlayId}
+              value={hookOverlayText}
+              onChange={(e) => setHookOverlayText(e.target.value)}
+              rows={3}
+              placeholder="Exact lines on the video; if set, skips AI hook text for those lines."
+              className="w-full resize-y rounded-md border border-stone-200 px-2 py-1.5 text-sm text-stone-900 placeholder:text-stone-400 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
+            />
+          </label>
+          <label className="block" htmlFor={editorialId}>
+            <span className="mb-1 block text-xs font-medium text-stone-700">
+              Editorial notes for AI{" "}
+              <span className="font-normal text-stone-500">(optional)</span>
+            </span>
+            <textarea
+              id={editorialId}
+              value={editorialNotes}
+              onChange={(e) => onEditorialNotesChange(e.target.value)}
+              rows={3}
+              placeholder="Guide smart editorial cuts (what to trim or keep)…"
+              className="w-full resize-y rounded-md border border-stone-200 px-2 py-1.5 text-sm text-stone-900 placeholder:text-stone-400 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
+            />
+            <p className="mt-1 text-[11px] text-stone-500">
+              Saved in this browser for the next upload too.
+            </p>
+          </label>
+        </fieldset>
+
+        <fieldset className="space-y-2.5" disabled={busy}>
+          <legend className="text-xs font-semibold uppercase tracking-wide text-stone-600">
+            Pipeline
+          </legend>
+          <p className="text-[11px] leading-snug text-stone-500">
+            Applied on re-process and on your next reel upload. Defaults are
+            tuned in code—no env variables required.
+          </p>
+          <label className="block" htmlFor={audioId}>
+            <span className="mb-1 block text-xs font-medium text-stone-700">
+              Audio cleanup
+            </span>
+            <select
+              id={audioId}
+              value={pipeline.audioMode}
+              onChange={(e) =>
+                updatePipeline({
+                  audioMode: e.target.value as ShortAudioMode,
+                })
+              }
+              className="w-full rounded-md border border-stone-200 bg-white px-2 py-1.5 text-sm text-stone-900 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
+            >
+              <option value="deepfilter">DeepFilter (recommended)</option>
+              <option value="fast">Fast (light cleanup)</option>
+              <option value="original">Original (no enhancement)</option>
+            </select>
+          </label>
+          <label className="flex cursor-pointer items-start gap-2 text-sm text-stone-800">
+            <input
+              type="checkbox"
+              checked={pipeline.smartEditorial}
+              onChange={(e) =>
+                updatePipeline({ smartEditorial: e.target.checked })
+              }
+              className="mt-0.5 h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
+            />
+            <span>
+              <span className="font-medium">Smart editorial</span>
+              <span className="mt-0.5 block text-xs text-stone-500">
+                Trim filler, false starts, repetition, and dead air.
+              </span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-2 text-sm text-stone-800">
+            <input
+              type="checkbox"
+              checked={pipeline.bookendZoom}
+              onChange={(e) =>
+                updatePipeline({ bookendZoom: e.target.checked })
+              }
+              className="mt-0.5 h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
+            />
+            <span>
+              <span className="font-medium">Intro / outro bookend zoom</span>
+              <span className="mt-0.5 block text-xs text-stone-500">
+                Slight zoom on the opening and closing beats.
+              </span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-2 text-sm text-stone-800">
+            <input
+              type="checkbox"
+              checked={pipeline.smartReframe}
+              onChange={(e) =>
+                updatePipeline({ smartReframe: e.target.checked })
+              }
+              className="mt-0.5 h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
+            />
+            <span>
+              <span className="font-medium">Smart reframe</span>
+              <span className="mt-0.5 block text-xs text-stone-500">
+                Follow the speaker; tighter crop in the first seconds.
+              </span>
+            </span>
+          </label>
+        </fieldset>
+
+        {!shortJobId ? (
+          <p className="text-xs text-amber-800">
+            Re-upload this video to enable re-process (job id required on the
+            Short server).
+          </p>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => void handleReprocess()}
+          disabled={busy || !shortJobId}
+          className="w-full rounded-lg bg-palette-moss py-2.5 text-sm font-semibold text-white transition hover:bg-palette-depth disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? "Re-processing…" : "Re-process short"}
+        </button>
+      </div>
+    </details>
+  );
+}
