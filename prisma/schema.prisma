@@ -1,0 +1,623 @@
+// BuildDaily Suite — unified Postgres schema
+// Generated from Phase 1 plan §3 on 2026-05-17.
+// Target: Postgres 18 on Coolify.
+//
+// Conventions:
+// - PascalCase Prisma models map to snake_case Postgres tables via @@map / @map.
+// - Foreign keys use onDelete: Cascade where the child cannot exist without the parent.
+// - Foreign keys use onDelete: SetNull where the child can survive parent deletion (e.g. brand on social_connections).
+// - String IDs are client-supplied (crypto.randomUUID()-compatible) for entities that originate in browser code.
+// - UUID IDs (gen_random_uuid()) are used for entities that only originate server-side. Requires pgcrypto.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// 3.1 Identity & billing
+// ============================================
+
+model User {
+  id             String   @id // Clerk user id (user_xxxxxxxx)
+  email          String   @unique
+  fullName       String?  @map("full_name")
+  avatarUrl      String?  @map("avatar_url")
+  timezone       String?  // IANA, e.g. America/Los_Angeles
+  displayName    String?  @map("display_name")
+  membershipType String   @default("free") @map("membership_type") // 'free' | 'pro' | 'team'
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  apiKeys              ApiKey[]
+  brands               Brand[]
+  referenceSources     ReferenceSource[]
+  visualReferences     VisualReference[]
+  learnedFromEdits     LearnedFromEdit[]
+  socialConnections    SocialConnection[]
+  scheduleEntries      ScheduleEntry[]
+  postPerformance      PostPerformance[]
+  projects             Project[]
+  dayRecords           DayRecord[]
+  challengeEnrollments ChallengeEnrollment[]
+  brollClips           BrollClip[]
+  contentItems         ContentItem[]
+  commenterProfiles    CommenterProfile[]
+  comments             Comment[]
+  voiceDocuments       VoiceDocument[]
+  voiceImportItems     VoiceImportItem[]
+  replyMemories        ReplyMemory[]
+  videoJobs            VideoJob[]
+  processingJobs       ProcessingJob[]
+
+  @@map("users")
+}
+
+model ApiKey {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyHash    String    @map("key_hash") // bcrypt(public_key); never store plaintext
+  label      String    // "Genspark", "n8n", etc.
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz
+  isActive   Boolean   @default(true) @map("is_active")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+// ============================================
+// 3.2 Brand layer — source of truth
+// ============================================
+
+model Brand {
+  id                  String   @id // crypto.randomUUID()-compatible
+  userId              String   @map("user_id")
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String
+  industry            String?  // d2c-saas | b2b-saas | coaching | agency | ecommerce | creator-tools | health-fitness | education | finance | other
+  businessType        String?  @map("business_type")
+  businessDescription String?  @map("business_description")
+  valueProps          String?  @map("value_props")
+  boundaries          String?
+  audienceTags        String[] @default([]) @map("audience_tags")
+  briefCombinedText   String?  @map("brief_combined_text")
+  // Promoted from Hub localStorage:
+  copyContext         String?  @map("copy_context")
+  copyFeedback        String?  @map("copy_feedback")
+  defaultCaptionCta   String?  @map("default_caption_cta")
+  // Promoted from CC's Workspace.businessContext:
+  goals               String[] @default([])
+  funnelNotes         String?  @map("funnel_notes")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  audiencePersonas AudiencePersona[]
+  brandDocuments   BrandDocument[]
+  products         Product[]
+  referenceSources ReferenceSource[]
+  visualReferences VisualReference[]
+  learnedFromEdits LearnedFromEdit[]
+  postPerformance  PostPerformance[]
+  projects         Project[]
+  voiceDocuments   VoiceDocument[]
+  replyMemories    ReplyMemory[]
+
+  @@index([userId])
+  @@index([industry])
+  @@map("brands")
+}
+
+model AudiencePersona {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId         String   @map("brand_id")
+  brand           Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  label           String   // "Primary", "Believer", "Skeptic", or custom
+  primaryAudience String?  @map("primary_audience")
+  audienceDetails String?  @map("audience_details")
+  voiceAndTone    String?  @map("voice_and_tone")
+  audiencePains   String?  @map("audience_pains")
+  believerPersona String?  @map("believer_persona")
+  skepticPersona  String?  @map("skeptic_persona")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([brandId])
+  @@map("audience_personas")
+}
+
+model BrandDocument {
+  id              String   @id
+  brandId         String   @map("brand_id")
+  brand           Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  fileName        String   @map("file_name")
+  storageProvider String   @default("bunny-storage") @map("storage_provider") // 'bunny-storage' | 'supabase-storage' (transition only)
+  storagePath     String   @map("storage_path")
+  mimeType        String?  @map("mime_type")
+  extractedText   String?  @map("extracted_text") // plain text for AI context
+  uploadedAt      DateTime @default(now()) @map("uploaded_at") @db.Timestamptz
+
+  @@index([brandId])
+  @@map("brand_documents")
+}
+
+model Product {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId      String   @map("brand_id")
+  brand        Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  url          String?
+  cta          String?  // "Start free trial", "Book a call"
+  priceCents   Int?     @map("price_cents")
+  displayOrder Int      @default(0) @map("display_order")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([brandId])
+  @@map("products")
+}
+
+model ReferenceSource {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandId     String?  @map("brand_id")
+  brand       Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  content     String
+  sourceLabel String?  @map("source_label")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId])
+  @@index([brandId])
+  @@map("reference_sources")
+}
+
+model VisualReference {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId               String   @map("user_id")
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandId              String?  @map("brand_id")
+  brand                Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  kind                 String   // 'carousel' | 'photo' | 'image'
+  profile              Json     // StoredVisualReference.profile blob
+  thumbnailStoragePath String?  @map("thumbnail_storage_path")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([userId, kind])
+  @@map("visual_references")
+}
+
+model LearnedFromEdit {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandId    String?  @map("brand_id")
+  brand      Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  beforeLine String   @map("before_line")
+  afterLine  String   @map("after_line")
+  context    String?  // 'carousel' | 'image-post' | 'caption'
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("learned_from_edits")
+}
+
+// ============================================
+// 3.3 Connections & posting
+// ============================================
+
+model SocialConnection {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String    @map("user_id")
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform         String    // 'linkedin' | 'x' | 'instagram' | 'threads' | 'tiktok' | 'youtube' | 'facebook' | 'medium' | 'substack'
+  accessTokenEnc   String    @map("access_token_enc") // encrypted with hub's CONNECTION_TOKEN_KEY
+  refreshTokenEnc  String?   @map("refresh_token_enc")
+  tokenExpiresAt   DateTime? @map("token_expires_at") @db.Timestamptz
+  scopes           String[]
+  externalUserId   String?   @map("external_user_id")
+  externalUsername String?   @map("external_username")
+  webhookSecret    String?   @map("webhook_secret")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([userId, platform])
+  @@index([userId])
+  @@map("social_connections")
+}
+
+model ScheduleEntry {
+  id              String    @id
+  userId          String    @map("user_id")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scheduleKind    String    @map("schedule_kind") // 'post' | 'reel' | 'short'
+  publishAt       DateTime  @map("publish_at") @db.Timestamptz
+  payload         Json
+  reelVideoStored Boolean   @default(false) @map("reel_video_stored")
+  postedAt        DateTime? @map("posted_at") @db.Timestamptz
+  error           String?
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  postPerformance PostPerformance[]
+
+  @@index([publishAt])
+  @@index([userId, publishAt])
+  @@map("schedule_entries")
+}
+
+model PostPerformance {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String         @map("user_id")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandId         String?        @map("brand_id")
+  brand           Brand?         @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  scheduleEntryId String?        @map("schedule_entry_id")
+  scheduleEntry   ScheduleEntry? @relation(fields: [scheduleEntryId], references: [id], onDelete: SetNull)
+  platform        String
+  externalPostUrl String?        @map("external_post_url")
+  externalPostId  String?        @map("external_post_id")
+  views           BigInt?
+  impressions     BigInt?
+  likes           BigInt?
+  comments        BigInt?
+  shares          BigInt?
+  retentionPct    Decimal?       @map("retention_pct") @db.Decimal
+  avgWatchSeconds Decimal?       @map("avg_watch_seconds") @db.Decimal
+  engagementRate  Decimal?       @map("engagement_rate") @db.Decimal
+  rawMetrics      Json?          @map("raw_metrics")
+  fetchedAt       DateTime       @default(now()) @map("fetched_at") @db.Timestamptz
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([userId, scheduleEntryId, platform])
+  @@index([userId])
+  @@index([brandId])
+  @@map("post_performance")
+}
+
+// ============================================
+// 3.4 Studio domain (video projects)
+// ============================================
+
+model Project {
+  id                 String   @id
+  userId             String   @map("user_id")
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name               String
+  type               String   // 'build-in-public' | 'challenge'
+  description        String?
+  brandId            String?  @map("brand_id")
+  brand              Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  brandName          String?  @map("brand_name") // denorm to avoid extra fetch on list cards
+  segmentPrompts     Json     @default("[]") @map("segment_prompts")
+  quickPlanSchedule  Json?    @map("quick_plan_schedule")
+  videoStyleDefaults Json?    @map("video_style_defaults")
+  videoOrientation   String?  @map("video_orientation") // 'vertical' | 'horizontal'
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  dayRecords           DayRecord[]
+  challengeEnrollments ChallengeEnrollment[]
+
+  @@index([userId])
+  @@index([brandId])
+  @@map("projects")
+}
+
+model DayRecord {
+  id        String   @id
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String   @map("project_id")
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  date      DateTime @db.Date
+  payload   Json     // segments, transcripts, overlays, etc.
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([projectId, date])
+  @@index([userId])
+  @@map("day_records")
+}
+
+model ChallengeEnrollment {
+  id          String   @id
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challengeId String   @map("challenge_id")
+  projectId   String   @map("project_id")
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId])
+  @@index([projectId])
+  @@map("challenge_enrollments")
+}
+
+model BrollClip {
+  id              String   @id
+  userId          String   @map("user_id")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storageProvider String   @default("bunny-stream") @map("storage_provider")
+  storagePath     String   @map("storage_path") // Bunny Stream video_id, or legacy supabase path during transition
+  durationSeconds Decimal  @map("duration_seconds") @db.Decimal
+  tags            String[] @default([])
+  name            String?
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId])
+  @@map("broll_library")
+}
+
+// ============================================
+// 3.5 Comment Convert domain
+// ============================================
+
+enum Platform {
+  YOUTUBE
+  INSTAGRAM
+  TIKTOK
+  FACEBOOK
+}
+
+model ContentItem {
+  id          String    @id
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform    Platform
+  externalId  String    @map("external_id")
+  title       String?
+  caption     String?
+  url         String?
+  publishedAt DateTime? @map("published_at") @db.Timestamptz
+  rawPayload  Json?     @map("raw_payload")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  comments Comment[]
+
+  @@unique([userId, platform, externalId])
+  @@map("content_items")
+}
+
+model CommenterProfile {
+  id            String   @id
+  userId        String   @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform      Platform
+  handle        String
+  followerCount Int?     @map("follower_count")
+  firstSeenAt   DateTime @default(now()) @map("first_seen_at") @db.Timestamptz
+  lastSeenAt    DateTime @default(now()) @map("last_seen_at") @db.Timestamptz
+  commentCount  Int      @default(0) @map("comment_count")
+
+  comments Comment[]
+
+  @@unique([userId, platform, handle])
+  @@index([userId])
+  @@map("commenter_profiles")
+}
+
+model Comment {
+  id                 String            @id
+  userId             String            @map("user_id")
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contentItemId      String            @map("content_item_id")
+  contentItem        ContentItem       @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  commenterProfileId String?           @map("commenter_profile_id")
+  commenterProfile   CommenterProfile? @relation(fields: [commenterProfileId], references: [id], onDelete: SetNull)
+  platform           Platform
+  externalId         String            @map("external_id")
+  parentExternalId   String?           @map("parent_external_id")
+  text               String
+  authorHandle       String            @map("author_handle")
+  publishedAt        DateTime          @map("published_at") @db.Timestamptz
+  rawPayload         Json?             @map("raw_payload")
+  traceId            String?           @map("trace_id")
+  createdAt          DateTime          @default(now()) @map("created_at") @db.Timestamptz
+
+  classifications Classification[]
+  inboxViewState  InboxViewState?
+  draftReplies    DraftReply[]
+  outcomeEvents   OutcomeEvent[]
+
+  @@unique([userId, platform, externalId])
+  @@index([userId, publishedAt(sort: Desc)])
+  @@map("comments")
+}
+
+model Classification {
+  id                String   @id
+  commentId         String   @map("comment_id")
+  comment           Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  version           Int      @default(1)
+  modelId           String   @map("model_id")
+  promptHash        String?  @map("prompt_hash")
+  intentTier        String   @map("intent_tier")
+  intentScore       Decimal  @map("intent_score") @db.Decimal
+  sentiment         String
+  isSpam            Boolean  @default(false) @map("is_spam")
+  isToxic           Boolean  @default(false) @map("is_toxic")
+  isQuestion        Boolean  @default(false) @map("is_question")
+  primaryTopic     String?  @map("primary_topic")
+  personaHint      String?  @map("persona_hint")
+  suggestedNextStep String? @map("suggested_next_step")
+  relationshipValue String  @default("medium") @map("relationship_value")
+  replyGoal         String  @default("engage") @map("reply_goal")
+  intentSegment    String? @map("intent_segment")
+  priorityScore    Decimal @map("priority_score") @db.Decimal
+  suppressed       Boolean @default(false)
+  rawDimensions    Json?   @map("raw_dimensions")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([commentId, version(sort: Desc)])
+  @@map("classifications")
+}
+
+model InboxViewState {
+  commentId       String    @id @map("comment_id")
+  comment         Comment   @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  surfaced        Boolean   @default(true)
+  needsResponse   Boolean   @default(false) @map("needs_response")
+  conversionReady Boolean   @default(false) @map("conversion_ready")
+  archived        Boolean   @default(false)
+  ignored         Boolean   @default(false)
+  snoozedUntil    DateTime? @map("snoozed_until") @db.Timestamptz
+  priorityRank    Int       @default(0) @map("priority_rank")
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("inbox_view_states")
+}
+
+model DraftReply {
+  id                    String   @id
+  commentId             String   @map("comment_id")
+  comment               Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  variant               String   // 'concise' | 'warm' | 'cta' etc.
+  body                  String
+  classificationVersion Int?     @map("classification_version")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  outcomeEvents OutcomeEvent[]
+
+  @@index([commentId])
+  @@map("draft_replies")
+}
+
+model OutcomeEvent {
+  id           String      @id
+  commentId    String      @map("comment_id")
+  comment      Comment     @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  draftReplyId String?     @map("draft_reply_id")
+  draftReply   DraftReply? @relation(fields: [draftReplyId], references: [id], onDelete: SetNull)
+  eventType    String      @map("event_type") // 'sent' | 'edited' | 'ignored' | 'conversion'
+  metadata     Json?
+  createdAt    DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([commentId, eventType])
+  @@map("outcome_events")
+}
+
+model VoiceDocument {
+  id         String   @id
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandId    String?  @map("brand_id")
+  brand      Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  title      String?
+  sourceText String   @map("source_text")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  chunks VoiceChunk[]
+
+  @@index([userId])
+  @@index([brandId])
+  @@map("voice_documents")
+}
+
+model VoiceChunk {
+  id         String        @id
+  documentId String        @map("document_id")
+  document   VoiceDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunkIndex Int           @map("chunk_index")
+  content    String
+  embedding  Json?         // JSON array; promote to pgvector later
+  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([documentId, chunkIndex])
+  @@map("voice_chunks")
+}
+
+model VoiceImportItem {
+  id                    String    @id
+  userId                String    @map("user_id")
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId               String    @map("video_id")
+  videoTitle            String?   @map("video_title")
+  viewerCommentText     String    @map("viewer_comment_text")
+  creatorReplyText      String    @map("creator_reply_text")
+  creatorReplyYoutubeId String    @map("creator_reply_youtube_id")
+  replyPublishedAt      DateTime? @map("reply_published_at") @db.Timestamptz
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([userId, creatorReplyYoutubeId])
+  @@index([userId])
+  @@map("voice_import_items")
+}
+
+model ReplyMemory {
+  id                  String   @id
+  userId              String   @map("user_id")
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandId             String?  @map("brand_id")
+  brand               Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  questionCluster     String   @map("question_cluster")
+  canonicalQuestion   String   @map("canonical_question")
+  approvedReply       String?  @map("approved_reply")
+  replyGoal           String   @map("reply_goal")
+  suggestedNextStep   String?  @map("suggested_next_step")
+  timesSeen           Int      @default(1) @map("times_seen")
+  lastSeenAt          DateTime @default(now()) @map("last_seen_at") @db.Timestamptz
+  avgSentiment        Decimal  @default(0) @map("avg_sentiment") @db.Decimal
+  bestPerformingReply String?  @map("best_performing_reply")
+  topic               String?
+  platforms           Json?
+  relatedVideos       Json?    @map("related_videos")
+  sampleComments      Json?    @map("sample_comments")
+  intentMix           Json?    @map("intent_mix")
+  embedding           Json?
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([userId, questionCluster])
+  @@index([userId, timesSeen(sort: Desc)])
+  @@map("reply_memories")
+}
+
+// ============================================
+// 3.6 V2S backend + Multiplier jobs
+// ============================================
+
+model VideoJob {
+  id             String   @id
+  userId         String?  @map("user_id") // nullable for legacy anonymous jobs during migration
+  user           User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status         String   @default("pending") // 'pending' | 'processing' | 'completed' | 'failed'
+  progress       String   @default("")
+  error          String?
+  workDir        String?  @map("work_dir") // container fs path
+  resultProvider String?  @map("result_provider") // 'bunny-stream' for outputs
+  resultPath     String?  @map("result_path") // Bunny Stream video_id
+  meta           Json     @default("{}") // editorial_summary, dialogue_trim, etc.
+  correlationId  String?  @unique @map("correlation_id") // client-supplied recovery key
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("video_jobs")
+}
+
+model ProcessingJob {
+  id          String    @id
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobType     String    @map("job_type")
+  traceId     String?   @map("trace_id")
+  payload     Json
+  status      String    @default("pending")
+  error       String?
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  processedAt DateTime? @map("processed_at") @db.Timestamptz
+
+  @@index([status, createdAt])
+  @@index([userId, status])
+  @@map("processing_jobs")
+}
