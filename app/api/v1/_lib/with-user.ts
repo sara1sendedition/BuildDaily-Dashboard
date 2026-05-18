@@ -31,8 +31,12 @@ type Handler = (args: HandlerArgs) => Promise<Response> | Response;
  * return value with a permissive ctx signature. Next 15 accepts it via
  * parameter contravariance.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Next15RouteHandler = (req: NextRequest, ctx?: any) => Promise<Response>;
+// Permissive ctx shape — Next 15's route-type check accepts this via
+// parameter contravariance even when the route has dynamic params.
+type Next15RouteHandler = (
+  req: NextRequest,
+  ctx?: unknown,
+) => Promise<Response>;
 
 /**
  * Wraps a Route Handler so it:
