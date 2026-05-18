@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withUser } from "@/app/api/v1/_lib/with-user";
 import {
@@ -43,9 +44,17 @@ export const POST = withUser(async ({ req, user }) => {
     description: str(body.description) ?? null,
     brandId: str(body.brandId) ?? null,
     brandName: str(body.brandName) ?? null,
-    segmentPrompts: (body.segmentPrompts ?? []) as object,
-    quickPlanSchedule: (body.quickPlanSchedule ?? null) as object | null,
-    videoStyleDefaults: (body.videoStyleDefaults ?? null) as object | null,
+    segmentPrompts: (body.segmentPrompts ?? []) as Prisma.InputJsonValue,
+    // Prisma JSON columns don't accept JS null directly; use Prisma.DbNull
+    // to clear the column.
+    quickPlanSchedule:
+      body.quickPlanSchedule == null
+        ? Prisma.DbNull
+        : (body.quickPlanSchedule as Prisma.InputJsonValue),
+    videoStyleDefaults:
+      body.videoStyleDefaults == null
+        ? Prisma.DbNull
+        : (body.videoStyleDefaults as Prisma.InputJsonValue),
     videoOrientation:
       str(body.videoOrientation) === "vertical" ||
       str(body.videoOrientation) === "horizontal"

@@ -21,6 +21,20 @@ export type HandlerArgs = {
 type Handler = (args: HandlerArgs) => Promise<Response> | Response;
 
 /**
+ * Next 15's route-handler type check is strict about the exported function's
+ * signature — for a dynamic route like `[id]/route.ts`, it generates a
+ * type that expects `(req, ctx: { params: Promise<{ id: string }> })`.
+ *
+ * Our wrapper has to accept ctx-or-no-ctx (since some routes have no
+ * dynamic segments at all) and pass through different param shapes.
+ * Rather than re-declare the param shape per route, we type the wrapper's
+ * return value with a permissive ctx signature. Next 15 accepts it via
+ * parameter contravariance.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Next15RouteHandler = (req: NextRequest, ctx?: any) => Promise<Response>;
+
+/**
  * Wraps a Route Handler so it:
  *  - Requires a signed-in Clerk user (otherwise 401)
  *  - Auto-upserts the row in our `users` table on first sight
@@ -29,8 +43,8 @@ type Handler = (args: HandlerArgs) => Promise<Response> | Response;
  *  - Catches UnauthorizedError + BadRequestError + unknown errors,
  *    returns RFC 7807 problem-details responses
  */
-export function withUser(handler: Handler) {
-  return async (
+export function withUser(handler: Handler): Next15RouteHandler {
+  const wrapped = async (
     req: NextRequest,
     ctx?: {
       params?:
@@ -67,4 +81,5 @@ export function withUser(handler: Handler) {
       );
     }
   };
+  return wrapped as Next15RouteHandler;
 }
