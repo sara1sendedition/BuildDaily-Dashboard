@@ -53,6 +53,7 @@ model User {
   replyMemories        ReplyMemory[]
   videoJobs            VideoJob[]
   processingJobs       ProcessingJob[]
+  multiplierQueueItems MultiplierQueueItem[]
 
   @@map("users")
 }
@@ -620,4 +621,35 @@ model ProcessingJob {
   @@index([status, createdAt])
   @@index([userId, status])
   @@map("processing_jobs")
+}
+
+// ============================================
+// 3.x Multiplier home-queue (Phase 3)
+// ============================================
+//
+// One row per processed-video the user has in their Multiplier home queue,
+// scheduled or not. Hydrated on home-page mount so the queue survives
+// browser refresh / device switch. The ScheduleEntry (calendar) and this
+// table are independent — a queue item can have zero, one, or many
+// ScheduleEntries pointing at it (via payload.queueItemId).
+//
+// `payload` carries: slideUrls[], slideUrlsInstagram[], imagePostUrl,
+// reelMp4Url, socialCaption, displayHook, transcript, editableSlides,
+// durationSec, effectiveType, layoutId, carouselOverride. See
+// `lib/multiplier-queue/types.ts` in the Multiplier repo for the shape.
+
+model MultiplierQueueItem {
+  id         String   @id // client-supplied; same as the in-memory queueItemId
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status     String   @default("processing") // 'processing' | 'done' | 'failed'
+  kind       String?  // 'carousel' | 'photo' | 'short' — null while still processing / unknown
+  videoLabel String   @map("video_label") // source filename, e.g. IMG_5875.MOV
+  payload    Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, status])
+  @@map("multiplier_queue_items")
 }
