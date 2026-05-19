@@ -1438,22 +1438,32 @@ export default function Home() {
                       onReprocess={reprocessActiveShortOutput}
                     />
 
-                    {showShortEditorialReport ? (
-                      <section
-                        className={`mx-auto w-full max-w-lg rounded-xl border px-4 py-4 shadow-sm ${
-                          shortEditorialSkip
+                    <details
+                      className={`group mx-auto w-full max-w-lg rounded-xl border text-left shadow-sm [&_summary::-webkit-details-marker]:hidden ${
+                        showShortEditorialReport
+                          ? shortEditorialSkip
                             ? "border-amber-200 bg-amber-50/90"
                             : "border-emerald-200/80 bg-emerald-50/40"
-                        }`}
-                        aria-label="Smart editorial report"
-                      >
-                        <h3 className="text-sm font-semibold text-stone-900">
-                          What smart editorial did
-                        </h3>
-                        <p className="mt-1 text-xs leading-snug text-stone-600">
+                          : "border-stone-200 bg-stone-50/90"
+                      }`}
+                      aria-label="Smart editorial report"
+                    >
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-sm font-semibold text-stone-900 marker:content-none hover:bg-white/40">
+                        <span>What smart editorial did</span>
+                        <span
+                          className="shrink-0 text-stone-400 transition-transform duration-200 group-open:rotate-180"
+                          aria-hidden
+                        >
+                          ▼
+                        </span>
+                      </summary>
+                      <div className="border-t border-stone-200/60 px-4 pb-4 pt-2">
+                        <p className="text-xs leading-snug text-stone-600">
                           From your Video to Short run: how the reel was trimmed on
                           the original timeline, and why.
                         </p>
+                        {showShortEditorialReport ? (
+                          <>
                         {shortEditorialSkip ? (
                           <p className="mt-3 text-sm leading-relaxed text-amber-950">
                             {shortEditorialSkip === "no_openai_api_key"
@@ -1513,15 +1523,8 @@ export default function Home() {
                             </ol>
                           </div>
                         ) : null}
-                      </section>
-                    ) : (
-                      <section
-                        className="mx-auto w-full max-w-lg rounded-xl border border-stone-200 bg-stone-50/90 px-4 py-4 shadow-sm"
-                        aria-label="Smart editorial report"
-                      >
-                        <h3 className="text-sm font-semibold text-stone-900">
-                          What smart editorial did
-                        </h3>
+                          </>
+                        ) : (
                         <p className="mt-3 text-sm leading-relaxed text-stone-700">
                           This app did not receive an editorial write-up for this job
                           (no{" "}
@@ -1543,8 +1546,9 @@ export default function Home() {
                           ). Your reel can still include trims and reframes; those
                           details live on the Video to Short service.
                         </p>
-                      </section>
-                    )}
+                        )}
+                      </div>
+                    </details>
 
                     <div className="relative">
                       {shortReprocessBusy ? (
@@ -1573,12 +1577,6 @@ export default function Home() {
                           >
                             Your browser does not support embedded video.
                           </video>
-                          <p className="mx-auto mt-2 max-w-lg px-1 text-center text-[11px] leading-snug text-stone-500">
-                            Quick jumps in framing or sudden crop changes usually come
-                            from smart reframe / bookend zoom (and any hard cuts), not
-                            from this preview player. Toggle those under Edit → Pipeline,
-                            then re-process.
-                          </p>
                         </>
                       ) : (
                         <p className="text-sm text-stone-600">Preparing preview…</p>
