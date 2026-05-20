@@ -13,22 +13,26 @@ import {
   type StudioShortPipelineSettings,
 } from "@/lib/studio-short-pipeline-settings";
 import type { StudioShortTextOptions } from "@/lib/run-video-to-short";
+import { ShortTimelineAdvancedModal } from "@/app/components/ShortTimelineAdvancedModal";
 
 type ShortEditPanelProps = {
   shortJobId: string | null;
   busy: boolean;
+  shortPreviewUrl?: string | null;
   onReprocess: (opts: StudioShortTextOptions) => Promise<void>;
 };
 
 export function ShortEditPanel({
   shortJobId,
   busy,
+  shortPreviewUrl,
   onReprocess,
 }: ShortEditPanelProps) {
   const hookId = useId();
   const overlayId = useId();
   const editorialId = useId();
   const audioId = useId();
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [hookInstructions, setHookInstructions] = useState("");
   const [hookOverlayText, setHookOverlayText] = useState("");
@@ -65,20 +69,19 @@ export function ShortEditPanel({
     []
   );
 
-  const handleReprocess = useCallback(async () => {
-    await onReprocess({
+  const buildReprocessOptions = useCallback(
+    (): StudioShortTextOptions => ({
       hook_instructions: hookInstructions.trim() || undefined,
       hook_overlay_text: hookOverlayText.trim() || undefined,
       editorial_notes: editorialNotes.trim() || undefined,
       pipeline,
-    });
-  }, [
-    onReprocess,
-    hookInstructions,
-    hookOverlayText,
-    editorialNotes,
-    pipeline,
-  ]);
+    }),
+    [hookInstructions, hookOverlayText, editorialNotes, pipeline]
+  );
+
+  const handleReprocess = useCallback(async () => {
+    await onReprocess(buildReprocessOptions());
+  }, [onReprocess, buildReprocessOptions]);
 
   return (
     <details className="rounded-lg border border-stone-300 bg-stone-50/90 shadow-sm [&>summary::-webkit-details-marker]:hidden">
@@ -223,15 +226,41 @@ export function ShortEditPanel({
             Short server).
           </p>
         ) : null}
-        <button
-          type="button"
-          onClick={() => void handleReprocess()}
-          disabled={busy || !shortJobId}
-          className="w-full rounded-lg bg-palette-moss py-2.5 text-sm font-semibold text-white transition hover:bg-palette-depth disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "Re-processing…" : "Re-process short"}
-        </button>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen(true)}
+            disabled={busy || !shortJobId || !pipeline.smartEditorial}
+            title={
+              !pipeline.smartEditorial
+                ? "Turn on Smart editorial in Pipeline to edit the timeline"
+                : undefined
+            }
+            className="w-full rounded-lg border border-stone-300 bg-white py-2.5 text-sm font-semibold text-stone-800 transition hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-1"
+          >
+            Advanced
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleReprocess()}
+            disabled={busy || !shortJobId}
+            className="w-full rounded-lg bg-palette-moss py-2.5 text-sm font-semibold text-white transition hover:bg-palette-depth disabled:cursor-not-allowed disabled:opacity-50 sm:flex-1"
+          >
+            {busy ? "Re-processing…" : "Re-process short"}
+          </button>
+        </div>
       </div>
+      {shortJobId ? (
+        <ShortTimelineAdvancedModal
+          open={advancedOpen}
+          onClose={() => setAdvancedOpen(false)}
+          shortJobId={shortJobId}
+          busy={busy}
+          outputPreviewUrl={shortPreviewUrl}
+          buildReprocessOptions={buildReprocessOptions}
+          onReprocess={onReprocess}
+        />
+      ) : null}
     </details>
   );
 }

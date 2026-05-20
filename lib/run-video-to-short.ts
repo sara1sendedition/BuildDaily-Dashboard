@@ -4,11 +4,15 @@ import {
   type StudioShortPipelineSettings,
 } from "@/lib/studio-short-pipeline-settings";
 import {
-  pickEditorialCutsFromJobPoll,
+  pickEditorialDisplayCutsFromJobPoll,
   pickEditorialSkipFromJobPoll,
   pickEditorialSummaryFromJobPoll,
 } from "@/lib/short-job-poll-meta";
 import { mergeShortEditorialNotes } from "@/lib/video-to-short-proxy-form";
+import {
+  removalsForReprocess,
+  type TimelineRemoval,
+} from "@/lib/short-timeline-types";
 
 /**
  * Client-side: submit a video to Video to Short (via Next proxy), poll until complete, return edited MP4 as File.
@@ -217,10 +221,6 @@ function pickEditorialSkipFromPoll(state: ShortJobPoll): string | null {
   return pickEditorialSkipFromJobPoll(state as Record<string, unknown>);
 }
 
-function pickEditorialCutsFromPoll(state: ShortJobPoll): unknown {
-  return pickEditorialCutsFromJobPoll(state as Record<string, unknown>);
-}
-
 /** Read editorial fields from a completed job status (top-level or `meta`). */
 export function editorialFieldsFromJobPoll(state: ShortJobPoll): {
   editorialSummary: string | null;
@@ -230,7 +230,9 @@ export function editorialFieldsFromJobPoll(state: ShortJobPoll): {
   return {
     editorialSummary: pickEditorialSummaryFromPoll(state),
     editorialSkip: pickEditorialSkipFromPoll(state),
-    editorialCuts: pickEditorialCutsFromPoll(state),
+    editorialCuts: pickEditorialDisplayCutsFromJobPoll(
+      state as Record<string, unknown>
+    ),
   };
 }
 
@@ -241,6 +243,8 @@ export type StudioShortTextOptions = {
   editorial_notes?: string;
   /** When omitted, code defaults from `studio-short-pipeline-settings` apply. */
   pipeline?: StudioShortPipelineSettings | null;
+  /** User-adjusted cuts from the timeline editor (skips LLM when set). */
+  timelineRemovals?: TimelineRemoval[];
 };
 
 export type VideoToShortRunResult = {
@@ -471,8 +475,24 @@ export async function reprocessVideoToShortJob(
   onProgress?: (message: string) => void
 ): Promise<VideoToShortRunResult> {
   const fd = new FormData();
-  // Not only editorial_notes: full pipeline flags including smart_editorial=true (see helper JSDoc).
-  appendStudioShortPipelineFormFields(fd, text);
+  // Timeline overrides are applied inside the smart-editorial path on the Short backend.
+  const effectiveText: StudioShortTextOptions =
+    text.timelineRemovals !== undefined
+      ? {
+          ...text,
+          pipeline: {
+            ...resolveStudioShortPipelineSettings(text.pipeline),
+            smartEditorial: true,
+          },
+        }
+      : text;
+  appendStudioShortPipelineFormFields(fd, effectiveText);
+  if (text.timelineRemovals !== undefined) {
+    fd.append(
+      "timeline_removals_json",
+      removalsForReprocess(text.timelineRemovals)
+    );
+  }
 
   const res = await fetch(
     clientApiPath(
@@ -506,9 +526,7 @@ export async function reprocessVideoToShortJob(
   return {
     outputFile: file,
     jobId,
-    editorialSummary: pickEditorialSummaryFromPoll(finalState),
-    editorialSkip: pickEditorialSkipFromPoll(finalState),
-    editorialCuts: pickEditorialCutsFromPoll(finalState),
+    ...editorialFieldsFromJobPoll(finalState),
   };
 }
 
@@ -609,9 +627,7 @@ export async function runVideoToShortIfEnabled(
     return {
       outputFile: file,
       jobId,
-      editorialSummary: pickEditorialSummaryFromPoll(finalState),
-      editorialSkip: pickEditorialSkipFromPoll(finalState),
-      editorialCuts: pickEditorialCutsFromPoll(finalState),
+      ...editorialFieldsFromJobPoll(finalState),
     };
   } catch (err) {
     // Failed runs aren't recoverable; keep no entry around to confuse the user.

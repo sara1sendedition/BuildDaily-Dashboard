@@ -1432,9 +1432,41 @@ export default function Home() {
                       </button>
                     </div>
 
+                    <div className="relative">
+                      {shortReprocessBusy ? (
+                        <div
+                          className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-xl bg-white/80 backdrop-blur-sm"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          <div
+                            className="h-10 w-10 animate-spin rounded-full border-2 border-stone-200 border-t-palette-moss"
+                            aria-hidden
+                          />
+                          <p className="text-sm font-medium text-stone-800">
+                            Re-processing short…
+                          </p>
+                        </div>
+                      ) : null}
+                      {shortPreviewUrl ? (
+                        <video
+                          key={shortPreviewUrl}
+                          src={shortPreviewUrl}
+                          controls
+                          playsInline
+                          className={`mx-auto max-h-[min(52vh,520px)] w-full max-w-lg rounded-xl border border-stone-200 bg-black object-contain shadow-inner ${shortReprocessBusy ? "pointer-events-none opacity-60" : ""}`}
+                        >
+                          Your browser does not support embedded video.
+                        </video>
+                      ) : (
+                        <p className="text-sm text-stone-600">Preparing preview…</p>
+                      )}
+                    </div>
+
                     <ShortEditPanel
                       shortJobId={shortJobId ?? null}
                       busy={shortReprocessBusy}
+                      shortPreviewUrl={shortPreviewUrl}
                       onReprocess={reprocessActiveShortOutput}
                     />
 
@@ -1549,39 +1581,6 @@ export default function Home() {
                         )}
                       </div>
                     </details>
-
-                    <div className="relative">
-                      {shortReprocessBusy ? (
-                        <div
-                          className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-xl bg-white/80 backdrop-blur-sm"
-                          role="status"
-                          aria-live="polite"
-                        >
-                          <div
-                            className="h-10 w-10 animate-spin rounded-full border-2 border-stone-200 border-t-palette-moss"
-                            aria-hidden
-                          />
-                          <p className="text-sm font-medium text-stone-800">
-                            Re-processing short…
-                          </p>
-                        </div>
-                      ) : null}
-                      {shortPreviewUrl ? (
-                        <>
-                          <video
-                            key={shortPreviewUrl}
-                            src={shortPreviewUrl}
-                            controls
-                            playsInline
-                            className={`mx-auto max-h-[min(52vh,520px)] w-full max-w-lg rounded-xl border border-stone-200 bg-black object-contain shadow-inner ${shortReprocessBusy ? "pointer-events-none opacity-60" : ""}`}
-                          >
-                            Your browser does not support embedded video.
-                          </video>
-                        </>
-                      ) : (
-                        <p className="text-sm text-stone-600">Preparing preview…</p>
-                      )}
-                    </div>
                   </div>
                 )}
               </div>

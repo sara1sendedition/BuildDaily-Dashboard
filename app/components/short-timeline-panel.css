@@ -1,0 +1,344 @@
+.short-timeline-panel {
+  color: #292524;
+}
+
+.short-timeline-panel .timeline-intro {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: #57534e;
+}
+
+.short-timeline-panel .timeline-videos {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+@media (min-width: 640px) {
+  .short-timeline-panel .timeline-videos {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.short-timeline-panel .timeline-video-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #78716c;
+  margin-bottom: 0.35rem;
+}
+
+.short-timeline-panel .timeline-video {
+  width: 100%;
+  max-height: 200px;
+  background: #0f1114;
+  border-radius: 8px;
+  border: 1px solid #e7e5e4;
+}
+
+.short-timeline-panel .timeline-track-wrap {
+  margin-bottom: 0.75rem;
+  overflow: visible;
+}
+
+.short-timeline-panel .timeline-track {
+  position: relative;
+  height: 2.75rem;
+  background: #3d6b4f;
+  border-radius: 8px;
+  overflow: visible;
+}
+
+.short-timeline-panel .timeline-cut-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #c5221f;
+  opacity: 0.92;
+  cursor: pointer;
+  z-index: 2;
+  min-width: 4px;
+}
+
+.short-timeline-panel .timeline-cut-block.selected {
+  outline: 2px solid #ca8a04;
+  outline-offset: -1px;
+  z-index: 4;
+}
+
+.short-timeline-panel .timeline-cut-handle {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 10px;
+  padding: 0;
+  border: none;
+  background: #fde047;
+  cursor: ew-resize;
+  z-index: 5;
+  border-radius: 2px;
+  touch-action: none;
+}
+
+.short-timeline-panel .timeline-cut-handle.start {
+  left: 0;
+  transform: translateX(-50%);
+}
+
+.short-timeline-panel .timeline-cut-handle.end {
+  right: 0;
+  transform: translateX(50%);
+}
+
+.short-timeline-panel .timeline-cut-handle:hover {
+  background: #fff;
+}
+
+.short-timeline-panel .card-inline {
+  background: #fafaf9;
+  border: 1px solid #e7e5e4;
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.short-timeline-panel .timeline-trim-title {
+  margin: 0 0 0.65rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.short-timeline-panel .timeline-trim-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: flex-end;
+}
+
+.short-timeline-panel .timeline-trim-fields label.mini {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #57534e;
+}
+
+.short-timeline-panel .timeline-trim-fields input {
+  width: 5.5rem;
+  border-radius: 6px;
+  border: 1px solid #d6d3d1;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.875rem;
+}
+
+.short-timeline-panel .timeline-trim-duration {
+  font-size: 0.85rem;
+  color: #78716c;
+  padding-bottom: 0.45rem;
+}
+
+.short-timeline-panel .timeline-trim-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.short-timeline-panel .btn-timeline-secondary {
+  padding: 0.35rem 0.55rem;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  border: 1px solid #d6d3d1;
+  background: white;
+  color: #44403c;
+  cursor: pointer;
+}
+
+.short-timeline-panel .btn-timeline-secondary:hover:not(:disabled) {
+  background: #f5f5f4;
+}
+
+.short-timeline-panel .btn-timeline-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.short-timeline-panel .timeline-stats {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: #78716c;
+}
+
+.short-timeline-panel .timeline-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  min-width: 2px;
+}
+
+.short-timeline-panel .timeline-seg.keep {
+  background: #4a8f62;
+}
+
+.short-timeline-panel .timeline-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #fff;
+  pointer-events: none;
+  z-index: 3;
+  transform: translateX(-1px);
+}
+
+.short-timeline-panel .timeline-ruler {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #78716c;
+  margin-top: 0.25rem;
+}
+
+.short-timeline-panel .timeline-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  font-size: 0.8rem;
+  color: #78716c;
+  margin-bottom: 1rem;
+}
+
+.short-timeline-panel .timeline-legend .swatch {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 2px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.short-timeline-panel .swatch.keep {
+  background: #4a8f62;
+}
+
+.short-timeline-panel .swatch.cut {
+  background: #c5221f;
+}
+
+.short-timeline-panel .timeline-cuts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.short-timeline-panel .timeline-cut-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  border-bottom: 1px solid #e7e5e4;
+  padding: 0.5rem 0;
+}
+
+.short-timeline-panel .timeline-cut-row.selected {
+  background: #f5f5f4;
+}
+
+.short-timeline-panel .timeline-cut-row.disabled {
+  opacity: 0.55;
+}
+
+.short-timeline-panel .timeline-cut-check {
+  flex: 0 0 auto;
+  padding-top: 0.2rem;
+}
+
+.short-timeline-panel .timeline-cut-body {
+  flex: 1;
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+
+.short-timeline-panel .timeline-cut-time {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.short-timeline-panel .timeline-cut-time .tag {
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: #e7e5e4;
+}
+
+.short-timeline-panel .timeline-cut-time .tag.editorial {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.short-timeline-panel .timeline-cut-time .tag.dialogue {
+  background: #e7e5e4;
+  color: #44403c;
+}
+
+.short-timeline-panel .timeline-cut-reason {
+  display: block;
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+
+.short-timeline-panel .timeline-cut-snippet {
+  display: block;
+  font-size: 0.8rem;
+  color: #78716c;
+  margin-top: 0.2rem;
+  word-break: break-word;
+}
+
+.short-timeline-panel .timeline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.short-timeline-panel .btn-timeline-primary {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border-radius: 8px;
+  border: none;
+  background: #4a6741;
+  color: white;
+  cursor: pointer;
+}
+
+.short-timeline-panel .btn-timeline-primary:hover:not(:disabled) {
+  background: #3d5636;
+}
+
+.short-timeline-panel .btn-timeline-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.short-timeline-panel .timeline-actions-hint {
+  font-size: 0.85rem;
+  color: #78716c;
+}

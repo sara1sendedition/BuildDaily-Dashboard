@@ -1535,6 +1535,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           text,
           getShortOutputFileName(row.file.name)
         );
+        shortEditorialHydratedRef.current.add(row.shortJobId);
         setQueue((prev) =>
           prev.map((q) =>
             q.id === aid
