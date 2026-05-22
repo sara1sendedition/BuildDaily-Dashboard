@@ -27,6 +27,7 @@ import {
   setCarouselFocusToStorage,
 } from "@/lib/carousel-focus";
 import { ShortEditPanel } from "@/app/components/ShortEditPanel";
+import { DriveInboxPanel } from "@/app/components/DriveInboxPanel";
 import { peekStitchedFiles, clearStitchedFile } from "@/lib/stitch-handoff";
 import {
   readInFlightShortJob,
@@ -996,6 +997,11 @@ export default function Home() {
               </label>
             </div>
           </details>
+
+          <DriveInboxPanel
+            onEnqueueFiles={(files) => enqueueFiles(files)}
+            disabled={queue.some((q) => q.status === "processing")}
+          />
 
           <div className="flex flex-col items-center text-center rounded-2xl border-2 border-dashed border-palette-sage bg-white p-4 shadow-md shadow-stone-200/50">
             <input
