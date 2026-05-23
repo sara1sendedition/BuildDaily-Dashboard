@@ -38,7 +38,14 @@ export default function RootLayout({
   return (
     <html lang="en" className={poppins.variable}>
       <body className={`${poppins.className} antialiased`}>
-        <ClerkProvider>
+        <ClerkProvider
+          appearance={{
+            variables: {
+              colorPrimary: "#588064",
+              colorPrimaryForeground: "#ffffff",
+            },
+          }}
+        >
           <header className="border-b border-[var(--bd-line)] bg-[var(--bd-paper)]/90 backdrop-blur-sm sticky top-0 z-40">
             <div className="mx-auto max-w-6xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
               <BuildDailyNav />
