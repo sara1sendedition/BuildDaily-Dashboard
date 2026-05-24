@@ -11,6 +11,7 @@ import {
   type TimelineData,
   type TimelineRemoval,
 } from "@/lib/short-timeline-types";
+import { parseScriptFromMeta, type TranscriptScriptData } from "@/lib/short-script-types";
 import { ShortTimelinePanel } from "@/app/components/ShortTimelinePanel";
 
 type Props = {
@@ -22,6 +23,15 @@ type Props = {
   buildReprocessOptions: () => StudioShortTextOptions;
   onReprocess: (opts: StudioShortTextOptions) => Promise<void>;
 };
+
+function emptyTimeline(sourceDurationSec: number): TimelineData {
+  return {
+    source_duration_sec: Math.max(sourceDurationSec, 1),
+    output_duration_sec: 0,
+    removals: [],
+    keep_spans: [],
+  };
+}
 
 function metaFromPoll(state: Record<string, unknown>): Record<string, unknown> {
   const raw = state.meta;
@@ -43,6 +53,7 @@ export function ShortTimelineAdvancedModal({
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
+  const [script, setScript] = useState<TranscriptScriptData | null>(null);
   const loadTimeline = useCallback(async (cancelled?: () => boolean) => {
     setLoading(true);
     setLoadError(null);
@@ -50,20 +61,36 @@ export function ShortTimelineAdvancedModal({
       const state = await fetchJobPollState(shortJobId);
       if (cancelled?.()) return;
       const meta = metaFromPoll(state as Record<string, unknown>);
-      const parsed = parseTimelineFromMeta(meta);
-      if (!parsed || parsed.removals.length === 0) {
+      const parsedTimeline = parseTimelineFromMeta(meta);
+      const parsedScript = parseScriptFromMeta(meta);
+      if (!parsedTimeline && !parsedScript) {
         if (cancelled?.()) return;
         setTimeline(null);
+        setScript(null);
         setLoadError(
-          "No cuts on the timeline yet. Run smart editorial or dialogue trim first, then open Advanced again."
+          "No script or timeline yet. Re-process with smart editorial enabled, then open Advanced again."
         );
         return;
       }
       if (cancelled?.()) return;
-      setTimeline(parsed);
+      const scriptDuration =
+        parsedScript?.segments.reduce(
+          (max, s) => Math.max(max, s.end_sec),
+          0
+        ) ?? 0;
+      setScript(parsedScript);
+      setTimeline(
+        parsedTimeline ??
+          emptyTimeline(
+            scriptDuration ||
+              parsedScript?.segments[parsedScript.segments.length - 1]?.end_sec ||
+              60
+          )
+      );
     } catch (e) {
       if (cancelled?.()) return;
       setTimeline(null);
+      setScript(null);
       setLoadError(
         e instanceof Error ? e.message : "Could not load timeline from Short job."
       );
@@ -75,6 +102,7 @@ export function ShortTimelineAdvancedModal({
   useEffect(() => {
     if (!open || !shortJobId) {
       setTimeline(null);
+      setScript(null);
       setLoadError(null);
       setLoading(false);
       return;
@@ -136,7 +164,7 @@ export function ShortTimelineAdvancedModal({
             id="short-timeline-modal-title"
             className="text-base font-semibold text-stone-900"
           >
-            Advanced — edit timeline
+            Advanced — edit script &amp; timeline
           </h2>
           <button
             type="button"
@@ -161,6 +189,7 @@ export function ShortTimelineAdvancedModal({
             <ShortTimelinePanel
               jobId={shortJobId}
               timeline={timeline}
+              script={script}
               sourceVideoSrc={sourceVideoSrc}
               outputVideoSrc={outputPreviewUrl ?? undefined}
               busy={busy}

@@ -17,11 +17,14 @@ import {
   type TimelineData,
   type TimelineRemoval,
 } from "@/lib/short-timeline-types";
+import { ShortScriptPanel } from "@/app/components/ShortScriptPanel";
+import type { TranscriptScriptData } from "@/lib/short-script-types";
 import "./short-timeline-panel.css";
 
 type Props = {
   jobId: string;
   timeline: TimelineData;
+  script?: TranscriptScriptData | null;
   sourceVideoSrc: string;
   outputVideoSrc?: string;
   busy: boolean;
@@ -36,6 +39,7 @@ type DragState = {
 export function ShortTimelinePanel({
   jobId,
   timeline: initialTimeline,
+  script,
   sourceVideoSrc,
   outputVideoSrc,
   busy,
@@ -49,11 +53,19 @@ export function ShortTimelinePanel({
     initialTimeline.removals.map((r) => normalizeRemoval({ ...r }))
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedScriptId, setSelectedScriptId] = useState<number | null>(null);
+  const [view, setView] = useState<"script" | "timeline">(
+    script?.segments.length ? "script" : "timeline"
+  );
 
   useEffect(() => {
     setRemovals(initialTimeline.removals.map((r) => normalizeRemoval({ ...r })));
     setSelectedId(null);
-  }, [jobId, initialTimeline]);
+    setSelectedScriptId(null);
+    if (script?.segments.length) {
+      setView("script");
+    }
+  }, [jobId, initialTimeline, script]);
 
   const duration = Math.max(
     initialTimeline.source_duration_sec,
@@ -188,9 +200,74 @@ export function ShortTimelinePanel({
   }, [removals, duration]);
 
   const enabledCuts = removals.filter((r) => r.enabled);
+  const showScriptTab = Boolean(script?.segments.length);
 
   return (
     <div className="short-timeline-panel timeline-panel">
+      {showScriptTab ? (
+        <div className="advanced-view-tabs" role="tablist" aria-label="Advanced editor">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "script"}
+            className={`advanced-view-tab${view === "script" ? " active" : ""}`}
+            onClick={() => setView("script")}
+          >
+            Script
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "timeline"}
+            className={`advanced-view-tab${view === "timeline" ? " active" : ""}`}
+            onClick={() => setView("timeline")}
+          >
+            Timeline
+          </button>
+        </div>
+      ) : null}
+
+      {view === "script" && script ? (
+        <>
+          <div className="timeline-videos timeline-videos-compact">
+            <div>
+              <span className="timeline-video-label">Source (scrub while editing)</span>
+              <video
+                ref={videoRef}
+                className="timeline-video"
+                src={sourceVideoSrc}
+                controls
+                preload="metadata"
+                onTimeUpdate={() =>
+                  setPlayhead(videoRef.current?.currentTime ?? 0)
+                }
+              />
+            </div>
+            {outputVideoSrc ? (
+              <div>
+                <span className="timeline-video-label">Output</span>
+                <video
+                  className="timeline-video"
+                  src={outputVideoSrc}
+                  controls
+                  preload="metadata"
+                />
+              </div>
+            ) : null}
+          </div>
+          <ShortScriptPanel
+            script={script}
+            removals={removals}
+            duration={duration}
+            busy={busy}
+            selectedSegmentId={selectedScriptId}
+            onSelectSegment={setSelectedScriptId}
+            onRemovalsChange={setRemovals}
+            onSeek={seek}
+          />
+        </>
+      ) : (
+        <>
       <p className="timeline-intro">
         Red regions are removed on the <strong>original upload</strong> timeline (
         {formatTimelineTime(0)}–{formatTimelineTime(duration)}). Drag the handles on
@@ -446,6 +523,8 @@ export function ShortTimelinePanel({
         )}{" "}
         removed from source
       </p>
+        </>
+      )}
 
       <div className="timeline-actions">
         <button
@@ -454,11 +533,13 @@ export function ShortTimelinePanel({
           disabled={busy || !hasChanges}
           onClick={() => onReprocess(removals)}
         >
-          Re-run with timeline changes
+          Re-run with {view === "script" ? "script" : "timeline"} changes
         </button>
         {!hasChanges ? (
           <span className="timeline-actions-hint">
-            Drag handles, edit times, or toggle cuts to enable re-run.
+            {view === "script"
+              ? "Tap lines to cut or restore them, then re-run."
+              : "Drag handles, edit times, or toggle cuts to enable re-run."}
           </span>
         ) : null}
       </div>

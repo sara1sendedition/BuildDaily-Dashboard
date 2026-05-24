@@ -342,3 +342,111 @@
   font-size: 0.85rem;
   color: #78716c;
 }
+
+.short-timeline-panel .advanced-view-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.short-timeline-panel .advanced-view-tab {
+  border: 1px solid #d6d3d1;
+  background: #fafaf9;
+  color: #44403c;
+  border-radius: 999px;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.short-timeline-panel .advanced-view-tab.active {
+  border-color: #4a6741;
+  background: #ecfdf3;
+  color: #1c3829;
+}
+
+.short-timeline-panel .timeline-videos-compact {
+  margin-bottom: 0.75rem;
+}
+
+.short-timeline-panel .script-segment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-height: min(42vh, 420px);
+  overflow-y: auto;
+}
+
+.short-timeline-panel .script-segment-row.selected .script-segment-btn {
+  outline: 2px solid #4a6741;
+  outline-offset: 1px;
+}
+
+.short-timeline-panel .script-segment-btn {
+  width: 100%;
+  text-align: left;
+  border: 1px solid #e7e5e4;
+  border-radius: 8px;
+  background: #fff;
+  color: #292524;
+  padding: 0.55rem 0.65rem;
+  cursor: pointer;
+}
+
+.short-timeline-panel .script-segment-row.removed .script-segment-btn {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.short-timeline-panel .script-segment-row.kept .script-segment-btn:hover {
+  border-color: #a8a29e;
+}
+
+.short-timeline-panel .script-segment-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.25rem;
+}
+
+.short-timeline-panel .script-segment-time {
+  font-size: 0.75rem;
+  color: #78716c;
+  font-variant-numeric: tabular-nums;
+}
+
+.short-timeline-panel .script-segment-badge {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  font-weight: 700;
+}
+
+.short-timeline-panel .script-segment-badge.keep {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.short-timeline-panel .script-segment-badge.cut {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.short-timeline-panel .script-segment-text {
+  display: block;
+  line-height: 1.4;
+  font-size: 0.92rem;
+  word-break: break-word;
+}
+
+.short-timeline-panel .script-segment-text.struck {
+  text-decoration: line-through;
+  color: #78716c;
+}
