@@ -1,9 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { ContentMultiplierHomeLink } from "@/app/components/ContentMultiplierMark";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
-import { VideoToShortExternalLink } from "@/app/components/VideoToShortExternalLink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   MAX_COPY_CONTEXT_CHARS,
@@ -99,35 +97,8 @@ export default function SettingsPage() {
   return (
     <main className="mx-auto max-w-2xl px-4 py-10 pb-20">
       <ContentMultiplierHomeLink className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-palette-depth hover:text-stone-900" />
-      <div className="mb-10 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+      <div className="mb-10">
         <h1 className="text-2xl font-bold text-stone-900">Settings</h1>
-        <div className="flex flex-wrap gap-2">
-          <Link
-            href="/multiplier"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
-          >
-            Carousel
-          </Link>
-          <Link
-            href="/image-post"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
-          >
-            Image-only
-          </Link>
-          <Link
-            href="/style-carousel"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
-          >
-            Style-match carousel
-          </Link>
-          <Link
-            href="/settings/visual-references"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
-          >
-            Visual references
-          </Link>
-          <VideoToShortExternalLink />
-        </div>
       </div>
 
       <div className="space-y-10">

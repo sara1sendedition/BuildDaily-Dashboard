@@ -21,7 +21,6 @@ import { HubQuickStats } from "@/app/components/hub/HubQuickStats";
 import { ContinueBanner, pickContinueItem } from "@/app/components/hub/ContinueBanner";
 import { ToolLauncherGrid } from "@/app/components/hub/ToolLauncherGrid";
 import type { ToolCardProps } from "@/app/components/hub/ToolCard";
-import { CommonPaths } from "@/app/components/hub/CommonPaths";
 
 const POLL_MS = 30_000;
 
@@ -218,11 +217,8 @@ export function HubDashboard() {
     <main className="mx-auto max-w-6xl px-4 py-8 pb-16">
       <header className="mb-6">
         <h1 className="font-serif text-3xl font-semibold text-[var(--bd-ink)] tracking-tight">
-          BuildDaily
-        </h1>
-        <p className="mt-2 text-stone-600">
           Hi {displayName} — your creator system from blank page to scheduled posts.
-        </p>
+        </h1>
       </header>
 
       <HubAggregateStats
@@ -272,8 +268,6 @@ export function HubDashboard() {
         </h2>
         <ToolLauncherGrid cards={toolCards} />
       </section>
-
-      <CommonPaths />
     </main>
   );
 }
