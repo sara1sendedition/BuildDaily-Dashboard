@@ -15,3 +15,20 @@ export function parseScheduledField(
   const sec = Math.floor(d.getTime() / 1000);
   return Number.isFinite(sec) && sec > 0 ? sec : undefined;
 }
+
+/**
+ * Returns the scheduled time only if it's far enough in the future to be a
+ * real native-schedule request. A time in the past (or within `skewSec`)
+ * means "publish now" — callers should drop it so it isn't forwarded to the
+ * platform (Instagram rejects any scheduled_publish_time unless allowlisted,
+ * and YouTube rejects a past publishAt). Mirrors /api/schedule/publish-now.
+ */
+export function futureScheduledOrUndefined(
+  raw: number | undefined,
+  nowSec: number = Math.floor(Date.now() / 1000),
+  skewSec: number = 600
+): number | undefined {
+  return raw != null && Number.isFinite(raw) && raw > nowSec + skewSec
+    ? raw
+    : undefined;
+}

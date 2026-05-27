@@ -1,4 +1,7 @@
-import type { QueueCarouselSnapshot } from "@/context/carousel-workspace-context";
+import type {
+  QueueCarouselSnapshot,
+  VideoQueueItem,
+} from "@/context/carousel-workspace-context";
 
 export type ScheduleContentKind = "carousel" | "photo" | "short";
 
@@ -37,6 +40,51 @@ export function displayHookForSchedule(
   return stem || videoFileName;
 }
 
+/** Calendar / schedule sidebar title; user rename wins over AI hook. */
+export function scheduleTitleForQueueItem(
+  kind: ScheduleContentKind,
+  snap: QueueCarouselSnapshot | null,
+  item: Pick<VideoQueueItem, "file" | "displayLabel">
+): string {
+  const custom = item.displayLabel?.trim();
+  if (custom) return custom;
+  return displayHookForSchedule(kind, snap, item.file.name);
+}
+
+export function queueHasSchedulableOutput(
+  snap: QueueCarouselSnapshot | null,
+  item: Pick<VideoQueueItem, "shortOutputFile">
+): boolean {
+  if (
+    snap?.zipBase64 &&
+    pickSlidePreviewPngsForCalendar(snap, true, true).length > 0
+  ) {
+    return true;
+  }
+  if (snap?.imagePost?.imageBase64 && snap.imagePost.imageBase64.length > 0) {
+    return true;
+  }
+  return Boolean(item.shortOutputFile);
+}
+
+/** First output type to pre-select when dropping a video onto the calendar. */
+export function defaultScheduleKindForQueue(
+  snap: QueueCarouselSnapshot | null,
+  item: Pick<VideoQueueItem, "shortOutputFile">
+): ScheduleContentKind {
+  if (
+    snap?.zipBase64 &&
+    pickSlidePreviewPngsForCalendar(snap, true, true).length > 0
+  ) {
+    return "carousel";
+  }
+  if (snap?.imagePost?.imageBase64 && snap.imagePost.imageBase64.length > 0) {
+    return "photo";
+  }
+  if (item.shortOutputFile) return "short";
+  return "carousel";
+}
+
 /** Ordered slide PNGs (raw base64, no data-URL prefix) for calendar thumbnails. */
 export function pickSlidePreviewPngsForCalendar(
   snap: QueueCarouselSnapshot | null,
@@ -64,6 +112,17 @@ export function pickPhotoPreviewPngsForCalendar(
 ): string[] {
   const b64 = snap?.imagePost?.imageBase64;
   return typeof b64 === "string" && b64.length > 0 ? [b64] : [];
+}
+
+/** In-memory image post and/or Bunny URL — enough to schedule or server-publish a photo. */
+export function photoAssetReadyForSchedule(
+  snap: QueueCarouselSnapshot | null | undefined,
+): boolean {
+  if (!snap) return false;
+  if (snap.imagePost?.imageBase64 && snap.imagePost.imageBase64.length > 0) {
+    return true;
+  }
+  return Boolean(snap.bunnyUrls?.imagePostUrl?.trim());
 }
 
 export function slideCountForCalendar(

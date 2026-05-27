@@ -1,30 +1,26 @@
 #!/usr/bin/env bash
-# Called by launchd every 5 minutes. Publishes calendar rows whose time is due (immediate Meta publish).
+# POST /api/schedule/publish-due — run from launchd/cron every ~5 minutes.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PORT="${NEXT_PORT:-3002}"
+BASE_URL="${PUBLISH_DUE_BASE_URL:-http://127.0.0.1:${PORT}}"
 
-# Load SCHEDULE_DAEMON_SECRET / NEXT_PORT from project .env (no secret in the plist).
-if [[ -f .env ]]; then
+if [[ -f "$ROOT/.env.local" ]]; then
   set -a
   # shellcheck disable=SC1091
-  . ./.env
+  source "$ROOT/.env.local"
   set +a
 fi
 
-# Default 3002 matches this repo’s dev port (leave another app on 3000). Override with NEXT_PORT in .env.
-PORT="${NEXT_PORT:-3002}"
-URL="http://127.0.0.1:${PORT}/api/schedule/publish-due"
-
-if [[ -z "${SCHEDULE_DAEMON_SECRET:-}" ]]; then
-  echo "ERROR: SCHEDULE_DAEMON_SECRET missing in .env (same value as NEXT_PUBLIC_SCHEDULE_DAEMON_SECRET)." >&2
+SECRET="${SCHEDULE_DAEMON_SECRET:-}"
+if [[ -z "$SECRET" ]]; then
+  echo "publish-due: SCHEDULE_DAEMON_SECRET is not set (.env.local or env)." >&2
   exit 1
 fi
 
-curl -sS -X POST "$URL" \
-  -H "Authorization: Bearer ${SCHEDULE_DAEMON_SECRET}" \
+curl -sf -X POST "${BASE_URL%/}/api/schedule/publish-due" \
+  -H "Authorization: Bearer ${SECRET}" \
   -H "Content-Type: application/json" \
-  -d '{}' | tee /tmp/video-studio-publish-due-last.json
-
-echo ""
+  --max-time 320

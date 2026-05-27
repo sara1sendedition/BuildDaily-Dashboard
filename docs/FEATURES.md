@@ -200,6 +200,7 @@ Body: `{ "transcript": [...], "copyContext?": "..." }`. Returns `{ twitterThread
 - **Server** — `lib/meta/publish.ts` and route handlers under `app/api/integrations/meta/*` use **`META_PAGE_ACCESS_TOKEN`**, **`META_PAGE_ID`**, optional **`META_GRAPH_API_VERSION`** (default `v21.0`).
 - **Limits** — `META_PUBLISH_MAX_BODY_BYTES`, `META_REEL_MAX_BODY_BYTES` (see `lib/meta/publish-limits.ts`; Vercel defaults noted in code).
 - **Client** — `lib/meta/publish-meta-client.ts` orchestrates init/part/finalize or single-shot flows from `app/page.tsx` and `app/schedule/page.tsx`.
+- **First comment** — Schedule entries may include optional `firstComment` in the Hub payload. Settings can store a **default first comment** (`lib/default-first-comment.ts`, localStorage) that pre-fills the schedule modal. After a successful publish, `lib/meta/post-first-comment.ts` posts it on Instagram and/or Facebook via Graph (`/{media-id}/comments`). Pinning is not available in the API; pin manually in the native apps. Requires Page token permissions `instagram_manage_comments` and `pages_manage_engagement`. Native Meta scheduled publish (`scheduledPublishTime` on publish-now) skips the first comment until the post is live. YouTube first comments are not implemented (OAuth uses `youtube.upload` only).
 
 ---
 
@@ -219,6 +220,7 @@ Body: `{ "transcript": [...], "copyContext?": "..." }`. Returns `{ twitterThread
 | `META_GRAPH_API_VERSION` | Optional Graph version string. |
 | `META_PUBLISH_MAX_BODY_BYTES` | Override per-request body limit for carousel/photo chunks. |
 | `META_REEL_MAX_BODY_BYTES` | Override reel upload body limit. |
+| `META_INSTAGRAM_NATIVE_SCHEDULE` | Allow `scheduled_publish_time` on Instagram Content Publishing (allowlisted apps). |
 
 See **`.env.example`** for templates; Meta vars are documented in code errors and above.
 

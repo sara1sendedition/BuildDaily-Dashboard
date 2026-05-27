@@ -7,6 +7,8 @@ import { parseVisualReferenceProfileJson } from "@/lib/visual-reference-for-prom
 import { deriveOverlayColorsFromProfile } from "@/lib/visual-reference-overlay";
 import { mergedStudioSlideStyleWithProfileAccent } from "@/lib/studio-carousel-text-style";
 import { parseFrameColorAdjustJson } from "@/lib/frame-color-adjust";
+import { isAllowedSourceVideoUrl } from "@/lib/allowed-source-video-url";
+import { fetchUrlToFile } from "@/lib/fetch-url-to-file";
 import { renderSlidesToZip } from "@/lib/render-zip";
 import { streamCarouselUploadToDisk } from "@/lib/stream-multipart-video";
 import type { LayoutId, SlidePlan, TranscriptSegment } from "@/lib/types";
@@ -47,6 +49,29 @@ export async function POST(request: Request) {
     fields = result.fields;
     if (result.backgroundUploadPath) {
       backgroundImagePath = result.backgroundUploadPath;
+    }
+    const resolveSourceVideoUrl = (): string => {
+      const sourceUrl = String(fields.sourceVideoUrl ?? "").trim();
+      if (!sourceUrl) {
+        throw new Error("Missing source video URL");
+      }
+      if (!isAllowedSourceVideoUrl(sourceUrl)) {
+        throw new Error("Source video URL is not from an allowed storage host");
+      }
+      return sourceUrl;
+    };
+
+    if (!result.videoUploaded) {
+      await fetchUrlToFile(resolveSourceVideoUrl(), videoPath, {
+        timeoutMs: 240_000,
+      });
+    } else {
+      const stat = await fs.stat(videoPath);
+      if (stat.size === 0) {
+        await fetchUrlToFile(resolveSourceVideoUrl(), videoPath, {
+          timeoutMs: 240_000,
+        });
+      }
     }
   } catch (e) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);

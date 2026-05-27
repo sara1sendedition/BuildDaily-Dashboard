@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { ContentMultiplierHomeLink } from "@/app/components/ContentMultiplierMark";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
+import { VideoToShortExternalLink } from "@/app/components/VideoToShortExternalLink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   MAX_COPY_CONTEXT_CHARS,
@@ -28,6 +30,11 @@ import {
   MAX_DEFAULT_CAPTION_CTA_CHARS,
   setDefaultCaptionCtaToStorage,
 } from "@/lib/default-caption-cta";
+import {
+  getDefaultFirstCommentFromStorage,
+  MAX_DEFAULT_FIRST_COMMENT_CHARS,
+  setDefaultFirstCommentToStorage,
+} from "@/lib/default-first-comment";
 export default function SettingsPage() {
   const contextFileInputRef = useRef<HTMLInputElement>(null);
   const sourcesFileInputRef = useRef<HTMLInputElement>(null);
@@ -36,6 +43,7 @@ export default function SettingsPage() {
   const [draftSources, setDraftSources] = useState("");
   const [copyFeedback, setCopyFeedback] = useState("");
   const [defaultCaptionCta, setDefaultCaptionCta] = useState("");
+  const [defaultFirstComment, setDefaultFirstComment] = useState("");
   const [learnedFromEditsLog, setLearnedFromEditsLog] = useState("");
 
   useEffect(() => {
@@ -43,6 +51,7 @@ export default function SettingsPage() {
     setDraftSources(getReferenceSourcesFromStorage());
     setCopyFeedback(getCopyFeedbackFromStorage());
     setDefaultCaptionCta(getDefaultCaptionCtaFromStorage());
+    setDefaultFirstComment(getDefaultFirstCommentFromStorage());
     setLearnedFromEditsLog(getLearnedFromEditsBlob());
   }, []);
 
@@ -94,11 +103,44 @@ export default function SettingsPage() {
     setDefaultCaptionCtaToStorage(v);
   }, []);
 
+  const onDefaultFirstCommentChange = useCallback((value: string) => {
+    const v = value.slice(0, MAX_DEFAULT_FIRST_COMMENT_CHARS);
+    setDefaultFirstComment(v);
+    setDefaultFirstCommentToStorage(v);
+  }, []);
+
   return (
     <main className="mx-auto max-w-2xl px-4 py-10 pb-20">
       <ContentMultiplierHomeLink className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-palette-depth hover:text-stone-900" />
-      <div className="mb-10">
+      <div className="mb-10 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold text-stone-900">Settings</h1>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/multiplier"
+            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
+          >
+            Carousel
+          </Link>
+          <Link
+            href="/image-post"
+            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
+          >
+            Image-only
+          </Link>
+          <Link
+            href="/style-carousel"
+            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
+          >
+            Style-match carousel
+          </Link>
+          <Link
+            href="/settings/visual-references"
+            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50"
+          >
+            Visual references
+          </Link>
+          <VideoToShortExternalLink />
+        </div>
       </div>
 
       <div className="space-y-10">
@@ -122,6 +164,30 @@ export default function SettingsPage() {
           <p className="mt-1 text-xs text-stone-400">
             {defaultCaptionCta.length.toLocaleString()} /{" "}
             {MAX_DEFAULT_CAPTION_CTA_CHARS.toLocaleString()} · Saved automatically
+          </p>
+        </section>
+
+        <section className="rounded-2xl border border-stone-200/80 bg-white/90 p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-stone-900">
+            Default first comment (optional)
+          </h2>
+          <p className="mt-2 text-sm text-stone-600">
+            Pre-fills the first comment when you add a post to the schedule. It is
+            posted automatically after publish on Instagram and/or Facebook. Pin
+            it in the native app if you want it at the top — the API cannot pin for
+            you. Stored only in your browser.
+          </p>
+          <textarea
+            id="default-first-comment-settings"
+            value={defaultFirstComment}
+            onChange={(e) => onDefaultFirstCommentChange(e.target.value)}
+            rows={3}
+            placeholder='e.g. "Full breakdown in our guide — link in bio"'
+            className="mt-4 w-full rounded-lg border border-stone-200 px-3 py-2 text-sm placeholder:text-stone-400"
+          />
+          <p className="mt-1 text-xs text-stone-400">
+            {defaultFirstComment.length.toLocaleString()} /{" "}
+            {MAX_DEFAULT_FIRST_COMMENT_CHARS.toLocaleString()} · Saved automatically
           </p>
         </section>
 

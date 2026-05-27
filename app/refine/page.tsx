@@ -22,6 +22,7 @@ export default function RefinePage() {
     slidePreviewBase64sInstagram,
     loading,
     reRenderLoading,
+    reRenderProgress,
     reRenderZip,
     socialCaption,
     setSocialCaption,
@@ -42,6 +43,7 @@ export default function RefinePage() {
     () => frameColorAdjustToCssFilter(frameColorAdjust),
     [frameColorAdjust]
   );
+  const carouselBusy = loading || reRenderLoading;
 
   useEffect(() => {
     if (
@@ -94,12 +96,12 @@ export default function RefinePage() {
       <div className="grid gap-10 lg:grid-cols-2 lg:items-start">
         <div
           className={`flex min-h-[min(420px,60vh)] flex-col rounded-2xl border p-6 shadow-md ${
-            loading
+            carouselBusy
               ? "border-palette-pale/40 bg-gradient-to-b from-palette-pale/30 via-palette-pale/15 to-slate-50/80 shadow-palette-pale/25"
               : "border-stone-200 bg-white shadow-stone-200/40"
           }`}
         >
-          {loading ? (
+          {carouselBusy ? (
             <div
               className="flex flex-1 flex-col items-center justify-center px-4 py-12 text-center"
               role="status"
@@ -114,7 +116,8 @@ export default function RefinePage() {
                 Updating Carousel
               </p>
               <p className="mt-2 max-w-xs text-sm text-stone-600">
-                Your preview will refresh when it&apos;s ready.
+                {reRenderProgress ??
+                  "Your preview will refresh when it\u2019s ready."}
               </p>
             </div>
           ) : (
@@ -179,14 +182,13 @@ export default function RefinePage() {
                     idPrefix="refine-carousel"
                     value={frameColorAdjust}
                     onChange={setFrameColorAdjust}
-                    disabled={loading || reRenderLoading}
+                    disabled={carouselBusy}
                   />
                   <button
                     type="button"
                     onClick={() => void reRenderZip()}
                     disabled={
-                      loading ||
-                      reRenderLoading ||
+                      carouselBusy ||
                       !zipBase64 ||
                       editableSlides.length === 0
                     }
@@ -215,7 +217,7 @@ export default function RefinePage() {
                       id={carouselSocialCaptionFieldId}
                       value={socialCaption}
                       onChange={(e) => setSocialCaption(e.target.value)}
-                      disabled={loading || reRenderLoading}
+                      disabled={carouselBusy}
                       rows={8}
                       placeholder="Caption appears here after processing…"
                       className="mt-2 w-full resize-y rounded-xl border border-stone-200 bg-stone-50/80 px-3 py-2.5 text-sm leading-relaxed text-stone-900 placeholder:text-stone-400 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:cursor-not-allowed disabled:opacity-60"

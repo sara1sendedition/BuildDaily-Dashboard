@@ -67,7 +67,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Pass the binary response straight through (large file — stream it).
   if (!upstream.ok) {
     const text = await upstream.text();
     return NextResponse.json(
@@ -76,12 +75,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const ct = upstream.headers.get("content-type") ?? "";
+  if (ct.includes("application/json")) {
+    const body = await upstream.json();
+    return NextResponse.json(body, { status: 200 });
+  }
+
+  // Legacy sync path: binary MP4 streamed straight through.
   const headers = new Headers();
-  const ct = upstream.headers.get("content-type");
   if (ct) headers.set("Content-Type", ct);
   const cd = upstream.headers.get("content-disposition");
   if (cd) headers.set("Content-Disposition", cd);
-  // Don't cache — each call produces a new file
   headers.set("Cache-Control", "no-store");
 
   return new NextResponse(upstream.body, {

@@ -3,6 +3,10 @@ import type { ScheduledCarouselPost } from "@/context/schedule-context";
 /**
  * Persisted row for the macOS launchd daemon: same metadata as the calendar plus
  * slide PNGs for Meta (carousel / photo) or a stored reel MP4 on disk for Short.
+ *
+ * Phase 2.0: `bunnyUrls` (inherited from ScheduledCarouselPost) takes priority
+ * over `publishSlidesBase64`. Publish-now / publish-due fetch from the URLs
+ * server-side and skip the legacy base64 disk read when both are present.
  */
 export type DaemonScheduleEntry = ScheduledCarouselPost & {
   /** Raw base64 or data-URL PNGs for `postMetaCarouselPublish` (carousel or photo). */
@@ -19,14 +23,21 @@ export type DaemonScheduleEntry = ScheduledCarouselPost & {
 };
 
 export function isDaemonCarouselOrPhotoPublishable(
-  e: DaemonScheduleEntry
-): e is DaemonScheduleEntry & { publishSlidesBase64: string[] } {
+  e: DaemonScheduleEntry,
+): boolean {
   if (e.scheduleKind === "short") return false;
-  return (
-    Array.isArray(e.publishSlidesBase64) &&
-    e.publishSlidesBase64.length > 0 &&
-    (e.scheduleKind === "carousel" || e.scheduleKind === "photo" || !e.scheduleKind)
-  );
+  const allowedKind =
+    e.scheduleKind === "carousel" ||
+    e.scheduleKind === "photo" ||
+    !e.scheduleKind;
+  if (!allowedKind) return false;
+  // Phase 2.0: prefer Bunny URLs when present; fall back to legacy base64.
+  const hasBunnyUrls =
+    (e.bunnyUrls?.slideUrls && e.bunnyUrls.slideUrls.length > 0) ||
+    !!e.bunnyUrls?.imagePostUrl;
+  const hasBase64 =
+    Array.isArray(e.publishSlidesBase64) && e.publishSlidesBase64.length > 0;
+  return hasBunnyUrls || hasBase64;
 }
 
 export function isDaemonReelPublishable(e: DaemonScheduleEntry): boolean {

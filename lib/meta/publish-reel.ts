@@ -108,6 +108,8 @@ export async function publishReelToMeta(
       sessionRes
     )) as MetaGraphErrorBody & {
       id?: string;
+      // Meta returns the resumable upload target in `uri`; some older docs/versions used `upload_url`.
+      uri?: string;
       upload_url?: string;
     };
     assertOk(sessionRes, sessionData);
@@ -115,9 +117,11 @@ export async function publishReelToMeta(
     const containerId =
       typeof sessionData.id === "string" ? sessionData.id : "";
     const uploadUrl =
-      typeof sessionData.upload_url === "string"
-        ? sessionData.upload_url
-        : "";
+      typeof sessionData.uri === "string"
+        ? sessionData.uri
+        : typeof sessionData.upload_url === "string"
+          ? sessionData.upload_url
+          : "";
     if (!containerId || !uploadUrl) {
       throw new MetaGraphError({
         error: {
@@ -131,7 +135,11 @@ export async function publishReelToMeta(
       method: "POST",
       headers: {
         Authorization: `OAuth ${accessToken}`,
-        file_offset: "0",
+        // Instagram resumable upload requires the header `offset` (not
+        // `file_offset`, which is the Facebook chunked-upload protocol).
+        // Wrong name => Meta rejects with "Header Offset not convertable
+        // to unsigned long". See Meta IG resumable-uploads docs.
+        offset: "0",
         file_size: String(video.length),
       },
       body: new Uint8Array(video),

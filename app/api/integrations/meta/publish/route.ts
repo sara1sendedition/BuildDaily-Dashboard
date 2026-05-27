@@ -8,7 +8,10 @@ import {
   utf8ByteLength,
 } from "@/lib/meta/publish-limits";
 import { getMetaEnv, publishCarouselToMeta } from "@/lib/meta/publish";
-import { parseScheduledField } from "@/lib/meta/parse-scheduled-field";
+import {
+  parseScheduledField,
+  futureScheduledOrUndefined,
+} from "@/lib/meta/parse-scheduled-field";
 import { stripEmDashes } from "@/lib/strip-em-dash";
 
 export const runtime = "nodejs";
@@ -130,8 +133,11 @@ export async function POST(request: Request) {
     }
 
     const caption = stripEmDashes(String(form.get("caption") ?? ""));
-    const scheduledPublishTime = parseScheduledField(
-      form.get("scheduledPublishTime") as string | undefined
+    // Past/near times mean "publish now" — drop them (see publish-reel route).
+    const scheduledPublishTime = futureScheduledOrUndefined(
+      parseScheduledField(
+        form.get("scheduledPublishTime") as string | undefined
+      )
     );
 
     try {
@@ -207,7 +213,10 @@ export async function POST(request: Request) {
   const caption = stripEmDashes(
     typeof body.caption === "string" ? body.caption : ""
   );
-  const scheduledPublishTime = parseScheduledField(body.scheduledPublishTime);
+  // Past/near times mean "publish now" — drop them (see publish-reel route).
+  const scheduledPublishTime = futureScheduledOrUndefined(
+    parseScheduledField(body.scheduledPublishTime)
+  );
 
   try {
     const result = await runPublish({

@@ -1,9 +1,15 @@
 /**
  * Video to Short pipeline toggles for the studio (create + reprocess).
- * Defaults live in code; persisted in localStorage for the next queue run.
+ * Defaults live in code (aligned with Video to Short ``app/config.py``).
  */
 
-export type ShortAudioMode = "original" | "fast" | "deepfilter";
+import {
+  CODE_DEFAULT_SHORT_AUDIO_MODE,
+  parseShortAudioMode,
+  type ShortAudioMode,
+} from "@/lib/short-audio-mode";
+
+export type { ShortAudioMode };
 
 export type StudioShortReframeTuning = {
   sample_interval_sec: number;
@@ -17,12 +23,17 @@ export type StudioShortReframeTuning = {
 };
 
 export type StudioShortPipelineSettings = {
+  /** When true (default), uses lighter/faster audio for iteration. Turn off in Advanced for production DeepFilter. */
+  devMode: boolean;
   audioMode: ShortAudioMode;
   smartEditorial: boolean;
   bookendZoom: boolean;
   smartReframe: boolean;
   reframe: StudioShortReframeTuning;
 };
+
+/** Audio mode applied while {@link StudioShortPipelineSettings.devMode} is on. */
+export const DEV_MODE_SHORT_AUDIO_MODE: ShortAudioMode = "fast";
 
 export const STUDIO_SHORT_REFRAME_DEFAULTS: StudioShortReframeTuning = {
   sample_interval_sec: 0.18,
@@ -36,7 +47,8 @@ export const STUDIO_SHORT_REFRAME_DEFAULTS: StudioShortReframeTuning = {
 };
 
 export const STUDIO_SHORT_PIPELINE_DEFAULTS: StudioShortPipelineSettings = {
-  audioMode: "deepfilter",
+  devMode: true,
+  audioMode: CODE_DEFAULT_SHORT_AUDIO_MODE,
   smartEditorial: true,
   bookendZoom: true,
   smartReframe: true,
@@ -44,9 +56,13 @@ export const STUDIO_SHORT_PIPELINE_DEFAULTS: StudioShortPipelineSettings = {
 };
 
 export const SHORT_PIPELINE_SETTINGS_STORAGE_KEY =
+  "v2c-short-pipeline-settings-v2";
+
+const LEGACY_PIPELINE_SETTINGS_STORAGE_KEY =
   "v2c-short-pipeline-settings-v1";
 
-const AUDIO_MODES: ShortAudioMode[] = ["original", "fast", "deepfilter"];
+/** Bump when stored shape or migration rules change. */
+export const PIPELINE_SETTINGS_SCHEMA_VERSION = 3;
 
 function clamp(n: number, min: number, max: number): number {
   if (!Number.isFinite(n)) return min;
@@ -64,15 +80,12 @@ function readReframeNumber(
   return Number.isFinite(n) ? clamp(n, min, max) : fallback;
 }
 
-function parseStoredPipeline(
-  raw: unknown
-): StudioShortPipelineSettings | null {
+function parseStoredPipeline(raw: unknown): StudioShortPipelineSettings | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
-  const audio =
-    typeof o.audioMode === "string" && AUDIO_MODES.includes(o.audioMode as ShortAudioMode)
-      ? (o.audioMode as ShortAudioMode)
-      : null;
+  const audio = parseShortAudioMode(
+    typeof o.audioMode === "string" ? o.audioMode : undefined
+  );
   if (!audio) return null;
 
   const reframeRaw =
@@ -82,6 +95,7 @@ function parseStoredPipeline(
   const d = STUDIO_SHORT_REFRAME_DEFAULTS;
 
   return {
+    devMode: o.devMode !== false,
     audioMode: audio,
     smartEditorial: o.smartEditorial !== false,
     bookendZoom: o.bookendZoom !== false,
@@ -129,35 +143,76 @@ function parseStoredPipeline(
   };
 }
 
-export function getStudioShortPipelineSettingsFromStorage(): StudioShortPipelineSettings {
-  if (typeof window === "undefined") {
-    return { ...STUDIO_SHORT_PIPELINE_DEFAULTS, reframe: { ...STUDIO_SHORT_REFRAME_DEFAULTS } };
+/** Undo mistaken v1 migration that forced deepfilter/fast → gym. */
+function normalizeMigratedAudioMode(mode: ShortAudioMode): ShortAudioMode {
+  if (mode === "gym") return CODE_DEFAULT_SHORT_AUDIO_MODE;
+  if (mode === "fast") return CODE_DEFAULT_SHORT_AUDIO_MODE;
+  return mode;
+}
+
+function readStoredSchemaVersion(raw: Record<string, unknown>): number {
+  return typeof raw.schemaVersion === "number" && Number.isFinite(raw.schemaVersion)
+    ? raw.schemaVersion
+    : 0;
+}
+
+/** One-time fix for rows saved before schemaVersion (mistaken gym default). */
+export function applyLegacyAudioMigration(
+  settings: StudioShortPipelineSettings
+): StudioShortPipelineSettings {
+  return {
+    ...settings,
+    audioMode: normalizeMigratedAudioMode(settings.audioMode),
+  };
+}
+
+function loadLegacyV1Settings(): StudioShortPipelineSettings | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(LEGACY_PIPELINE_SETTINGS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = parseStoredPipeline(JSON.parse(raw));
+    if (!parsed) return null;
+    return {
+      ...parsed,
+      audioMode: normalizeMigratedAudioMode(parsed.audioMode),
+    };
+  } catch {
+    return null;
   }
+}
+
+export function getStudioShortPipelineSettingsFromStorage(): StudioShortPipelineSettings {
+  const fallback = {
+    ...STUDIO_SHORT_PIPELINE_DEFAULTS,
+    reframe: { ...STUDIO_SHORT_REFRAME_DEFAULTS },
+  };
+  if (typeof window === "undefined") return fallback;
+
   try {
     const raw = window.localStorage.getItem(SHORT_PIPELINE_SETTINGS_STORAGE_KEY);
-    if (!raw) {
-      return {
-        ...STUDIO_SHORT_PIPELINE_DEFAULTS,
-        reframe: { ...STUDIO_SHORT_REFRAME_DEFAULTS },
-      };
-    }
-    const parsed = parseStoredPipeline(JSON.parse(raw));
-    if (parsed) {
-      // Studio used to default to `fast`; align persisted settings with backend default.
-      if (parsed.audioMode === "fast") {
-        const migrated = { ...parsed, audioMode: "deepfilter" as const };
-        setStudioShortPipelineSettingsToStorage(migrated);
-        return migrated;
+    if (raw) {
+      const record = JSON.parse(raw) as Record<string, unknown>;
+      const parsed = parseStoredPipeline(record);
+      if (parsed) {
+        const schemaVersion = readStoredSchemaVersion(record);
+        if (schemaVersion < PIPELINE_SETTINGS_SCHEMA_VERSION) {
+          const migrated = applyLegacyAudioMigration(parsed);
+          setStudioShortPipelineSettingsToStorage(migrated);
+          return migrated;
+        }
+        return parsed;
       }
-      return parsed;
+    }
+    const legacy = loadLegacyV1Settings();
+    if (legacy) {
+      setStudioShortPipelineSettingsToStorage(legacy);
+      return legacy;
     }
   } catch {
     /* ignore */
   }
-  return {
-    ...STUDIO_SHORT_PIPELINE_DEFAULTS,
-    reframe: { ...STUDIO_SHORT_REFRAME_DEFAULTS },
-  };
+  return fallback;
 }
 
 export function setStudioShortPipelineSettingsToStorage(
@@ -167,7 +222,10 @@ export function setStudioShortPipelineSettingsToStorage(
   try {
     window.localStorage.setItem(
       SHORT_PIPELINE_SETTINGS_STORAGE_KEY,
-      JSON.stringify(settings)
+      JSON.stringify({
+        ...settings,
+        schemaVersion: PIPELINE_SETTINGS_SCHEMA_VERSION,
+      })
     );
   } catch {
     /* quota / disabled */
@@ -182,8 +240,12 @@ export function resolveStudioShortPipelineSettings(
   if (!partial) {
     return { ...base, reframe: { ...base.reframe } };
   }
+  const audioMode =
+    parseShortAudioMode(partial.audioMode) ?? base.audioMode;
   return {
-    audioMode: partial.audioMode ?? base.audioMode,
+    devMode:
+      typeof partial.devMode === "boolean" ? partial.devMode : base.devMode,
+    audioMode,
     smartEditorial:
       typeof partial.smartEditorial === "boolean"
         ? partial.smartEditorial
@@ -197,5 +259,16 @@ export function resolveStudioShortPipelineSettings(
         ? partial.smartReframe
         : base.smartReframe,
     reframe: { ...base.reframe, ...partial.reframe },
+  };
+}
+
+/** Pipeline fields actually sent to Video to Short (dev mode overrides audio). */
+export function resolveEffectiveStudioShortPipelineSettings(
+  settings: StudioShortPipelineSettings
+): StudioShortPipelineSettings {
+  if (!settings.devMode) return settings;
+  return {
+    ...settings,
+    audioMode: DEV_MODE_SHORT_AUDIO_MODE,
   };
 }

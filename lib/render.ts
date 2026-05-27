@@ -4,7 +4,10 @@ import { ensureSlideFonts } from "./fonts";
 import type { BrandingPreset } from "./types";
 import type { LayoutId } from "./types";
 import type { SlidePlan } from "./types";
-import { FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS } from "./carousel-slide-limits";
+import {
+  FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS,
+  truncateHeadlineAtWordBoundary,
+} from "./carousel-slide-limits";
 import { resolveReferenceTextAnchor } from "./reference-text-layout";
 import type { ReferenceTextPlacement, SlideCanvasTextStyle } from "./slide-canvas-types";
 
@@ -574,17 +577,19 @@ export async function renderSlideToPng(
   if (slideIndex === 0) {
     if (title.trim().length > 0) {
       if (title.length > FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS) {
-        title = title
-          .slice(0, FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS)
-          .trimEnd();
+        title = truncateHeadlineAtWordBoundary(
+          title,
+          FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS
+        );
       }
     } else if (
       body.trim().length > 0 &&
       body.length > FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS
     ) {
-      body = body
-        .slice(0, FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS)
-        .trimEnd();
+      body = truncateHeadlineAtWordBoundary(
+        body,
+        FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS
+      );
     }
   }
 

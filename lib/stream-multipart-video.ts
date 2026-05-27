@@ -26,10 +26,13 @@ export type StreamCarouselUploadResult = {
   fields: Record<string, string>;
   /** Raw uploaded path before optional FFmpeg normalize (caller deletes with workDir). */
   backgroundUploadPath?: string;
+  /** False when `sourceVideoUrl` is provided instead of a multipart `video` file. */
+  videoUploaded: boolean;
 };
 
 /**
- * Streams multipart form: required `video`, optional `background` image, plus string fields.
+ * Streams multipart form: `video` file **or** `sourceVideoUrl` field, optional
+ * `background` image, plus string fields.
  */
 export async function streamCarouselUploadToDisk(
   request: Request,
@@ -135,13 +138,24 @@ export async function streamCarouselUploadToDisk(
         try {
           await Promise.all(fileWrites);
           if (!gotVideo) {
-            finish(new Error("Missing video file"));
+            const sourceUrl = String(fields.sourceVideoUrl ?? "").trim();
+            if (!sourceUrl) {
+              finish(new Error("Missing video file"));
+              return;
+            }
+            finish(null, {
+              videoPath,
+              fields,
+              backgroundUploadPath,
+              videoUploaded: false,
+            });
             return;
           }
           finish(null, {
             videoPath,
             fields,
             backgroundUploadPath,
+            videoUploaded: true,
           });
         } catch (e) {
           finish(e);

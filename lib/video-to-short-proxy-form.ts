@@ -1,8 +1,13 @@
 /**
- * Video to Short requests are proxied from Next to the FastAPI backend. We normalize
- * multipart fields here so deploys (Coolify, Docker) get consistent editorial + audio
- * behavior without rebuilding the client — set VIDEO_TO_SHORT_AUDIO_MODE on the server.
+ * Shared Video to Short form helpers. Job/stitch/reprocess routes stream multipart
+ * verbatim to FastAPI; the browser sets ``audio_mode`` in ``run-video-to-short.ts``.
+ * Editorial baseline is merged client-side before upload.
  */
+
+import {
+  CODE_DEFAULT_SHORT_AUDIO_MODE,
+  parseShortAudioMode,
+} from "@/lib/short-audio-mode";
 
 /** Always merged into `editorial_notes` before upstream (plus optional creator brief). */
 export const DEFAULT_SHORT_EDITORIAL_GUIDANCE = `
@@ -24,25 +29,27 @@ export function mergeShortEditorialNotes(userNotes: string): string {
 }
 
 /**
- * Server-only env wins (Coolify secrets), then public build-time env, then whatever the
- * browser sent, then studio default. Common backend values: original | fast | deepfilter.
- * Default `deepfilter` matches the Video to Short FastAPI form default.
+ * Prefer the browser's Pipeline dropdown, then optional env override, then code default
+ * (matches Video to Short ``app/config.py``).
  */
 export function resolveShortAudioMode(clientSent: string | null): string {
-  const server = process.env.VIDEO_TO_SHORT_AUDIO_MODE?.trim();
+  const fromClient = parseShortAudioMode(clientSent);
+  if (fromClient) return fromClient;
+  const server = parseShortAudioMode(
+    process.env.VIDEO_TO_SHORT_AUDIO_MODE?.trim()
+  );
   if (server) return server;
-  const pub = process.env.NEXT_PUBLIC_VIDEO_TO_SHORT_AUDIO_MODE?.trim();
+  const pub = parseShortAudioMode(
+    process.env.NEXT_PUBLIC_VIDEO_TO_SHORT_AUDIO_MODE?.trim()
+  );
   if (pub) return pub;
-  const c = clientSent?.trim();
-  if (c) return c;
-  return "deepfilter";
+  return CODE_DEFAULT_SHORT_AUDIO_MODE;
 }
 
-/** Strips and replaces `editorial_notes` / `audio_mode` so proxy owns canonical values. */
+/** Legacy helper if a route buffers multipart; prefer streaming pass-through. */
 export function rewriteVideoToShortProxyFormData(incoming: FormData): FormData {
   let userEditorial = "";
   let clientAudio: string | null = null;
-  /** Upload parts must stay last — some multipart stacks assume `file` / `files` close the body. */
   const uploadParts: Array<[string, FormDataEntryValue]> = [];
   const out = new FormData();
 

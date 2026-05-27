@@ -1,6 +1,8 @@
 import type { QueueCarouselSnapshot } from "@/context/carousel-workspace-context";
+import type { ScheduleContentKind } from "@/lib/schedule/calendar-preview-thumbs";
+import type { BunnyAssetUrls } from "@/lib/storage/bunny-upload-client";
 
-function pickSlidesForMetaFromArrays(
+export function pickSlidesForMetaFromArrays(
   youtubeSlides: string[],
   instagramSlides: string[],
   postToInstagram: boolean,
@@ -79,4 +81,27 @@ export function captionFromImagePostSnapshot(
 export function imagePostSlideForMeta(snap: QueueCarouselSnapshot): string[] {
   const b64 = snap.imagePost?.imageBase64;
   return typeof b64 === "string" && b64.length > 0 ? [b64] : [];
+}
+
+/** Bunny slide URLs for server-side publish (matches in-browser slide picking). */
+export function bunnySlideUrlsForMetaPublish(
+  bunnyUrls: BunnyAssetUrls | undefined,
+  postToInstagram: boolean,
+  postToFacebook: boolean,
+  scheduleKind: Extract<ScheduleContentKind, "carousel" | "photo"> = "carousel",
+): string[] | undefined {
+  if (!bunnyUrls) return undefined;
+  const imagePostUrl = bunnyUrls.imagePostUrl?.trim();
+  if (scheduleKind === "photo") {
+    return imagePostUrl ? [imagePostUrl] : undefined;
+  }
+  const fromCarousel = pickSlidesForMetaFromArrays(
+    bunnyUrls.slideUrls ?? [],
+    bunnyUrls.slideUrlsInstagram ?? [],
+    postToInstagram,
+    postToFacebook,
+  );
+  if (fromCarousel.length > 0) return fromCarousel;
+  if (imagePostUrl) return [imagePostUrl];
+  return undefined;
 }

@@ -6,10 +6,10 @@ import {
   setShortEditorialNotesToStorage,
 } from "@/lib/short-editorial-notes-storage";
 import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
+import { parseShortAudioMode } from "@/lib/short-audio-mode";
 import {
   getStudioShortPipelineSettingsFromStorage,
   setStudioShortPipelineSettingsToStorage,
-  type ShortAudioMode,
   type StudioShortPipelineSettings,
 } from "@/lib/studio-short-pipeline-settings";
 import type { StudioShortTextOptions } from "@/lib/run-video-to-short";
@@ -148,28 +148,10 @@ export function ShortEditPanel({
             Pipeline
           </legend>
           <p className="text-[11px] leading-snug text-stone-500">
-            Applied on re-process and on your next reel upload. Defaults are
-            tuned in code—no env variables required.
+            {pipeline.devMode
+              ? "Dev mode is on — fast audio cleanup for quicker iteration. Turn it off under Advanced pipeline for production DeepFilter."
+              : "Production pipeline — DeepFilter and your saved audio choice apply on re-process and your next upload."}
           </p>
-          <label className="block" htmlFor={audioId}>
-            <span className="mb-1 block text-xs font-medium text-stone-700">
-              Audio cleanup
-            </span>
-            <select
-              id={audioId}
-              value={pipeline.audioMode}
-              onChange={(e) =>
-                updatePipeline({
-                  audioMode: e.target.value as ShortAudioMode,
-                })
-              }
-              className="w-full rounded-md border border-stone-200 bg-white px-2 py-1.5 text-sm text-stone-900 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
-            >
-              <option value="deepfilter">DeepFilter (recommended)</option>
-              <option value="fast">Fast (light cleanup)</option>
-              <option value="original">Original (no enhancement)</option>
-            </select>
-          </label>
           <label className="flex cursor-pointer items-start gap-2 text-sm text-stone-800">
             <input
               type="checkbox"
@@ -218,6 +200,54 @@ export function ShortEditPanel({
               </span>
             </span>
           </label>
+
+          <details className="rounded-md border border-stone-200 bg-stone-50/80 px-2.5 py-2 [&>summary::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-wide text-stone-600">
+              Advanced pipeline
+              <span className="ml-1 font-normal normal-case tracking-normal text-stone-400">
+                ▾
+              </span>
+            </summary>
+            <div className="mt-2.5 space-y-2.5 border-t border-stone-200 pt-2.5">
+              <label className="flex cursor-pointer items-start gap-2 text-sm text-stone-800">
+                <input
+                  type="checkbox"
+                  checked={pipeline.devMode}
+                  onChange={(e) =>
+                    updatePipeline({ devMode: e.target.checked })
+                  }
+                  className="mt-0.5 h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
+                />
+                <span>
+                  <span className="font-medium">Dev mode</span>
+                  <span className="mt-0.5 block text-xs text-stone-500">
+                    Fast audio cleanup while you iterate. Uncheck for production
+                    DeepFilter on the next run.
+                  </span>
+                </span>
+              </label>
+              {!pipeline.devMode ? (
+                <label className="block" htmlFor={audioId}>
+                  <span className="mb-1 block text-xs font-medium text-stone-700">
+                    Audio cleanup
+                  </span>
+                  <select
+                    id={audioId}
+                    value={pipeline.audioMode}
+                    onChange={(e) => {
+                      const mode = parseShortAudioMode(e.target.value);
+                      if (mode) updatePipeline({ audioMode: mode });
+                    }}
+                    className="w-full rounded-md border border-stone-200 bg-white px-2 py-1.5 text-sm text-stone-900 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
+                  >
+                    <option value="deepfilter">DeepFilter (recommended)</option>
+                    <option value="fast">Fast (light cleanup)</option>
+                    <option value="original">Original (no enhancement)</option>
+                  </select>
+                </label>
+              ) : null}
+            </div>
+          </details>
         </fieldset>
 
         {!shortJobId ? (

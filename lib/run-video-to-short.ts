@@ -1,5 +1,6 @@
 import { clientApiPath } from "@/lib/client-api-path";
 import {
+  resolveEffectiveStudioShortPipelineSettings,
   resolveStudioShortPipelineSettings,
   type StudioShortPipelineSettings,
 } from "@/lib/studio-short-pipeline-settings";
@@ -17,13 +18,24 @@ import {
 /**
  * Client-side: submit a video to Video to Short (via Next proxy), poll until complete, return edited MP4 as File.
  *
- * Studio defaults favor full polish: AI smart editorial, intro/outro bookend zoom, hook overlay +
- * captions on the Short backend. Pipeline toggles (`audio_mode`, reframe, bookend) are set from
- * `StudioShortTextOptions.pipeline` (UI + localStorage) — the Next proxy is a pass-through.
+ * Studio defaults start in dev mode (fast audio). Turn off dev mode under Advanced
+ * pipeline for production DeepFilter. Pipeline toggles (`audio_mode`, reframe, bookend)
+ * are set from `StudioShortTextOptions.pipeline` (UI + localStorage) — the Next proxy
+ * is a pass-through.
  */
 
 const POLL_MS = 1200;
 const MAX_WAIT_MS = 45 * 60 * 1000;
+
+export type RunVideoToShortOptions = {
+  signal?: AbortSignal;
+};
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+}
 
 /**
  * Persist the most recent in-flight Short job ID so the home page can offer
@@ -272,6 +284,13 @@ export function getShortOutputFileName(originalName: string): string {
   return `${safe || "video"}_short.mp4`;
 }
 
+/** Same-origin proxy URL for streaming a completed Short job in `<video src>`. */
+export function shortJobDownloadApiUrl(jobId: string): string {
+  return clientApiPath(
+    `/api/video-to-short/jobs/${encodeURIComponent(jobId)}/download`
+  );
+}
+
 /**
  * Same multipart fields for POST /api/jobs (create) and POST /api/jobs/:id/reprocess.
  * Keep `smart_editorial=true` in sync with the Vite “Smart editorial” path. Final
@@ -281,7 +300,9 @@ export function appendStudioShortPipelineFormFields(
   fd: FormData,
   text: StudioShortTextOptions
 ): void {
-  const pipe = resolveStudioShortPipelineSettings(text.pipeline);
+  const pipe = resolveEffectiveStudioShortPipelineSettings(
+    resolveStudioShortPipelineSettings(text.pipeline)
+  );
   const hookIn = (text.hook_instructions ?? "").trim();
   fd.append(
     "hook_instructions",
@@ -343,11 +364,13 @@ function sameOriginApiFailureMessage(
 
 export async function fetchJobPollState(
   jobId: string,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  signal?: AbortSignal
 ): Promise<ShortJobPoll> {
+  throwIfAborted(signal);
   const pollRes = await fetch(
     clientApiPath(`/api/video-to-short/jobs/${encodeURIComponent(jobId)}`),
-    { cache: "no-store" }
+    { cache: "no-store", signal }
   );
   const pollText = await pollRes.text();
   if (!pollRes.ok) {
@@ -416,10 +439,12 @@ export type ShortPollResult = {
 export async function pollVideoToShortJobUntilFile(
   jobId: string,
   outputFileName: string,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  signal?: AbortSignal
 ): Promise<ShortPollResult> {
   const deadline = Date.now() + MAX_WAIT_MS;
   for (;;) {
+    throwIfAborted(signal);
     if (Date.now() > deadline) {
       throw new Error(
         "Video to Short timed out after 45 minutes. Check the Short backend logs."
@@ -427,8 +452,9 @@ export async function pollVideoToShortJobUntilFile(
     }
 
     await sleep(POLL_MS);
+    throwIfAborted(signal);
 
-    const state = await fetchJobPollState(jobId, onProgress);
+    const state = await fetchJobPollState(jobId, onProgress, signal);
 
     if (state.status === "failed") {
       const em =
@@ -444,7 +470,7 @@ export async function pollVideoToShortJobUntilFile(
         clientApiPath(
           `/api/video-to-short/jobs/${encodeURIComponent(jobId)}/download?${bust}`
         ),
-        { cache: "no-store" }
+        { cache: "no-store", signal }
       );
       if (!dlRes.ok) {
         const t = await dlRes.text();
@@ -463,6 +489,43 @@ export async function pollVideoToShortJobUntilFile(
       return { file, finalState: state };
     }
   }
+}
+
+/** Download the MP4 when the job is already `completed` (Hub refresh / rehydrate). */
+export async function downloadCompletedShortFile(
+  jobId: string,
+  outputFileName: string,
+  signal?: AbortSignal
+): Promise<File> {
+  throwIfAborted(signal);
+  const state = await fetchJobPollState(jobId, undefined, signal);
+  if (state.status === "failed") {
+    const em =
+      typeof state.error === "string" && state.error.trim()
+        ? state.error.trim()
+        : "Video to Short job failed.";
+    throw new Error(em);
+  }
+  if (state.status !== "completed") {
+    throw new Error(
+      `Short is still ${state.status}. Keep this tab open or use the recovery banner when it finishes.`
+    );
+  }
+  const bust = `_=${Date.now()}`;
+  const dlRes = await fetch(
+    clientApiPath(
+      `/api/video-to-short/jobs/${encodeURIComponent(jobId)}/download?${bust}`
+    ),
+    { cache: "no-store", signal }
+  );
+  if (!dlRes.ok) {
+    const t = await dlRes.text();
+    throw new Error(
+      sameOriginApiFailureMessage(dlRes.status, t, "Short download failed")
+    );
+  }
+  const blob = await dlRes.blob();
+  return new File([blob], outputFileName, { type: "video/mp4" });
 }
 
 /**
@@ -538,8 +601,10 @@ export async function reprocessVideoToShortJob(
 export async function runVideoToShortIfEnabled(
   video: File,
   onProgress?: (message: string) => void,
-  text: StudioShortTextOptions = {}
+  text: StudioShortTextOptions = {},
+  opts?: RunVideoToShortOptions
 ): Promise<VideoToShortRunResult> {
+  const signal = opts?.signal;
   // Skip / disabled paths return the input unchanged and explicit nulls so the
   // queue item doesn't display a stale "editorial summary" from a prior run.
   const passthroughResult: VideoToShortRunResult = {
@@ -566,22 +631,28 @@ export async function runVideoToShortIfEnabled(
 
   const fd = buildCreateJobsFormData(video, text);
   fd.append("client_correlation_id", correlationId);
+  throwIfAborted(signal);
   const createRes = await fetch(clientApiPath("/api/video-to-short/jobs"), {
     method: "POST",
     body: fd,
+    signal,
   });
 
   const createText = await createRes.text();
   if (createRes.status === 503) {
     try {
       const j = JSON.parse(createText) as { disabled?: boolean };
-      if (j.disabled === true) return passthroughResult;
+      if (j.disabled === true) {
+        clearPreUploadCorrelation();
+        return passthroughResult;
+      }
     } catch {
       /* fall through */
     }
   }
 
   if (!createRes.ok) {
+    clearPreUploadCorrelation();
     let err = sameOriginApiFailureMessage(
       createRes.status,
       createText,
@@ -602,6 +673,7 @@ export async function runVideoToShortIfEnabled(
     if (typeof j.id !== "string" || !j.id) throw new Error("No job id");
     jobId = j.id;
   } catch {
+    clearPreUploadCorrelation();
     throw new Error("Invalid response from Video to Short (no job id).");
   }
 
@@ -621,7 +693,8 @@ export async function runVideoToShortIfEnabled(
     const { file, finalState } = await pollVideoToShortJobUntilFile(
       jobId,
       getShortOutputFileName(video.name),
-      onProgress
+      onProgress,
+      signal
     );
     clearInFlightShortJob();
     return {
@@ -630,8 +703,8 @@ export async function runVideoToShortIfEnabled(
       ...editorialFieldsFromJobPoll(finalState),
     };
   } catch (err) {
-    // Failed runs aren't recoverable; keep no entry around to confuse the user.
-    clearInFlightShortJob();
+    // Keep in-flight record when a jobId was persisted so the recovery banner can
+    // resume polling/download after a mobile tab suspend or network blip.
     throw err;
   }
 }
@@ -686,7 +759,6 @@ export async function recoverInFlightShortJob(
     clearInFlightShortJob();
     return file;
   } catch (err) {
-    clearInFlightShortJob();
     throw err;
   }
 }

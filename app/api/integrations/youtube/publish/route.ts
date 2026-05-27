@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getMaxReelUploadBytes } from "@/lib/meta/publish-limits";
+import { futureScheduledOrUndefined } from "@/lib/meta/parse-scheduled-field";
 import { getYoutubeAccessTokenFromRefresh } from "@/lib/youtube/access-token";
 import { uploadYoutubeVideoResumable } from "@/lib/youtube/upload-resumable";
 
@@ -62,8 +63,13 @@ export async function POST(request: Request) {
   let publishAtIsoUtc: string | undefined;
   if (scheduledRaw != null && String(scheduledRaw).trim() !== "") {
     const unix = parseInt(String(scheduledRaw), 10);
-    if (Number.isFinite(unix) && unix > 0) {
-      publishAtIsoUtc = new Date(unix * 1000).toISOString();
+    // Past/near times mean "publish now" — leave publishAtIsoUtc unset so the
+    // video goes public immediately (YouTube rejects a past publishAt).
+    const future = futureScheduledOrUndefined(
+      Number.isFinite(unix) ? unix : undefined
+    );
+    if (future) {
+      publishAtIsoUtc = new Date(future * 1000).toISOString();
     }
   }
 

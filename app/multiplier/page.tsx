@@ -9,10 +9,11 @@ import {
 import { ImagePostStudioPanel } from "@/app/components/ImagePostStudioPanel";
 import { SocialMicroPanel } from "@/app/components/SocialMicroPanel";
 import { RefinePanel } from "@/app/components/RefinePanel";
-import { ContentMultiplierMark } from "@/app/components/ContentMultiplierMark";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
 import { FrameColorAdjustSliders } from "@/app/components/FrameColorAdjustSliders";
 import { useCarouselWorkspace, type VideoQueueItem } from "@/context/carousel-workspace-context";
+import { useScheduleStore } from "@/context/schedule-context";
+import { QueueItemEditableTitle } from "@/app/components/QueueItemEditableTitle";
 import { clientApiPath } from "@/lib/client-api-path";
 import { frameColorAdjustToCssFilter } from "@/lib/frame-color-adjust";
 import {
@@ -27,27 +28,33 @@ import {
   setCarouselFocusToStorage,
 } from "@/lib/carousel-focus";
 import { ShortEditPanel } from "@/app/components/ShortEditPanel";
+import { X_THREADS_OUTPUT_ENABLED } from "@/lib/studio-output-flags";
 import { DriveInboxPanel } from "@/app/components/DriveInboxPanel";
 import { peekStitchedFiles, clearStitchedFile } from "@/lib/stitch-handoff";
 import {
   readInFlightShortJob,
   clearInFlightShortJob,
-  recoverInFlightShortJob,
   readPreUploadCorrelation,
   clearPreUploadCorrelation,
   lookupShortJobByCorrelationId,
+  shortJobDownloadApiUrl,
   type InFlightShortJob,
 } from "@/lib/run-video-to-short";
 import { normalizeShortEditorialCuts } from "@/lib/normalize-short-editorial-cuts";
+import { queueItemDisplayLabel } from "@/lib/queue-display-label";
+import { isMobileClient } from "@/lib/mobile-client";
 
 type StudioTab = "carousel" | "image" | "social" | "short";
 type MetaPublishContentKind = "carousel" | "photo" | "short";
 
 export default function Home() {
+  const { syncTitlesForQueueItem } = useScheduleStore();
   const {
     queue,
     activeQueueId,
     selectQueueItem,
+    removeQueueItem,
+    renameQueueItem,
     enqueueFiles,
     error,
     recommendation,
@@ -66,6 +73,7 @@ export default function Home() {
     setSocialCaption,
     loading,
     reRenderLoading,
+    reRenderProgress,
     reRenderZip,
     flushActiveQueueSnapshot,
     frameColorAdjust,
@@ -76,6 +84,11 @@ export default function Home() {
     shortEditorialSummary,
     shortEditorialSkip,
     shortEditorialCuts,
+    shortError,
+    reelMp4Url,
+    shortResumeBusy,
+    shortResumeMessage,
+    recoverInFlightShortForQueue,
     shortReprocessBusy,
     reprocessActiveShortOutput,
     studioOutputs,
@@ -84,6 +97,14 @@ export default function Home() {
 
   const activeQueueItem = queue.find((q) => q.id === activeQueueId);
   const activeItemProcessing = activeQueueItem?.status === "processing";
+  const queueHasActiveWork = queue.some(
+    (q) => q.status === "processing" || q.status === "pending"
+  );
+
+  const [mobileClient, setMobileClient] = useState(false);
+  useEffect(() => {
+    setMobileClient(isMobileClient());
+  }, []);
 
   const carouselColorPreviewFilter = useMemo(
     () => frameColorAdjustToCssFilter(frameColorAdjust),
@@ -141,7 +162,9 @@ export default function Home() {
 
   /** Queue row finished (includes carousel-only, short-only, or any mix of outputs). */
   const hasProcessed = activeQueueItem?.status === "done";
-  const hasShortOutput = Boolean(shortOutputFile && hasProcessed);
+  const hasShortOutput = Boolean(
+    hasProcessed && (shortOutputFile || reelMp4Url)
+  );
 
   const shortEditorialCutRows = useMemo(
     () => normalizeShortEditorialCuts(shortEditorialCuts),
@@ -166,9 +189,25 @@ export default function Home() {
 
   /** Short tab: separate reel file, or editorial metadata-only row (rare). */
   const shortOutputTabVisible = useMemo(
-    () => hasShortOutput || showShortEditorialReport,
-    [hasShortOutput, showShortEditorialReport]
+    () =>
+      hasShortOutput ||
+      showShortEditorialReport ||
+      Boolean(shortJobId && hasProcessed) ||
+      Boolean(shortError && hasProcessed),
+    [
+      hasShortOutput,
+      showShortEditorialReport,
+      shortJobId,
+      hasProcessed,
+      shortError,
+    ]
   );
+
+  const effectiveStudioTab = useMemo((): StudioTab => {
+    if (studioTab === "short" && !shortOutputTabVisible) return "carousel";
+    if (studioTab === "social" && !X_THREADS_OUTPUT_ENABLED) return "carousel";
+    return studioTab;
+  }, [studioTab, shortOutputTabVisible]);
 
   useEffect(() => {
     let cancelled = false;
@@ -223,12 +262,6 @@ export default function Home() {
     };
   }, []);
 
-  useEffect(() => {
-    if (studioTab === "short" && !shortOutputTabVisible) {
-      setStudioTab("carousel");
-    }
-  }, [studioTab, shortOutputTabVisible]);
-
   // Pick up a stitched MP4 handed over from /stitch.
   //
   // v2 (mobile-resilient) flow — addresses two failure modes from the v1
@@ -256,11 +289,31 @@ export default function Home() {
       } catch {
         /* ignore — session storage may be unavailable */
       }
+      const hasLiveWork = queue.some(
+        (q) =>
+          (q.status === "pending" || q.status === "processing") &&
+          q.file.size > 0
+      );
+      const handoffAlreadyConsumed = queue.some(
+        (q) => q.status === "done" && q.file.size > 0
+      );
       if (alreadyEnqueued === String(peeked.createdAt)) {
-        // Already enqueued in THIS browser session. The queue item is in
-        // memory (or just finished); don't re-enqueue. Refresh would clear
-        // sessionStorage, at which point we'd re-enqueue and resume.
-        return;
+        if (hasLiveWork || handoffAlreadyConsumed) {
+          // Active run in progress, or batch already finished — do not re-enqueue.
+          setStitchedHandoffActive(true);
+          return;
+        }
+        // Page refreshed mid-run: session says enqueued but no live File in memory.
+        for (const item of queue) {
+          const interruptedStub =
+            item.file.size === 0 &&
+            (item.status === "processing" ||
+              (item.status === "error" &&
+                item.error?.includes("Processing was interrupted")));
+          if (interruptedStub) {
+            removeQueueItem(item.id);
+          }
+        }
       }
       try {
         window.sessionStorage.setItem(sessionKey, String(peeked.createdAt));
@@ -275,7 +328,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [enqueueFiles]);
+  }, [enqueueFiles, queue, removeQueueItem]);
 
   // Once a queue item reaches a terminal success state and we know it came
   // from the stitched-file handoff, clear the IDB stash. Failures keep the
@@ -352,21 +405,7 @@ export default function Home() {
     setRecoveringShort(true);
     setRecoverShortError(null);
     try {
-      const file = await recoverInFlightShortJob(inFlightShortJob);
-      // The recovered file IS the Short MP4 the backend already finished.
-      // Trigger a browser download so the user gets the result back without
-      // re-running the (expensive) Short pipeline. They can re-upload it
-      // through the regular UI if they also want carousel/image/social
-      // outputs derived from it.
-      const url = URL.createObjectURL(file);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = file.name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Defer revoke so the click has time to start the download.
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      await recoverInFlightShortForQueue(inFlightShortJob);
       setInFlightShortJob(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Recovery failed";
@@ -374,30 +413,90 @@ export default function Home() {
     } finally {
       setRecoveringShort(false);
     }
-  }, [inFlightShortJob]);
+  }, [inFlightShortJob, recoverInFlightShortForQueue]);
+
+  /** Stream preview from the Short backend when the MP4 is not in memory yet. */
+  const shortJobPreviewEligible = useMemo(() => {
+    if (!hasProcessed || !shortJobId?.trim()) return false;
+    if (shortOutputFile || reelMp4Url) return false;
+    if (showShortEditorialReport || shortResumeBusy) return true;
+    if (!shortError) return true;
+    const err = shortError.toLowerCase();
+    return (
+      err.includes("download failed") ||
+      err.includes("lost connection") ||
+      err.includes("load it automatically") ||
+      err.includes("still processing")
+    );
+  }, [
+    hasProcessed,
+    shortJobId,
+    shortOutputFile,
+    reelMp4Url,
+    showShortEditorialReport,
+    shortResumeBusy,
+    shortError,
+  ]);
 
   const [shortPreviewUrl, setShortPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
-    if (!shortOutputFile || !hasProcessed) {
+    if (!hasProcessed) {
       setShortPreviewUrl(null);
       return;
     }
-    const url = URL.createObjectURL(shortOutputFile);
-    setShortPreviewUrl(url);
-    return () => {
-      URL.revokeObjectURL(url);
-    };
-  }, [shortOutputFile, hasProcessed]);
+    if (shortOutputFile) {
+      const url = URL.createObjectURL(shortOutputFile);
+      setShortPreviewUrl(url);
+      return () => {
+        URL.revokeObjectURL(url);
+      };
+    }
+    const remote = reelMp4Url?.trim();
+    if (remote) {
+      setShortPreviewUrl(remote);
+      return;
+    }
+    const jobId = shortJobId?.trim();
+    if (jobId && shortJobPreviewEligible) {
+      setShortPreviewUrl(shortJobDownloadApiUrl(jobId));
+      return;
+    }
+    setShortPreviewUrl(null);
+  }, [
+    shortOutputFile,
+    hasProcessed,
+    reelMp4Url,
+    shortJobId,
+    shortJobPreviewEligible,
+  ]);
 
   const downloadShortMp4 = useCallback(() => {
-    if (!shortOutputFile) return;
-    const url = URL.createObjectURL(shortOutputFile);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = shortOutputFile.name || "short.mp4";
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [shortOutputFile]);
+    if (shortOutputFile) {
+      const url = URL.createObjectURL(shortOutputFile);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = shortOutputFile.name || "short.mp4";
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    if (reelMp4Url) {
+      const a = document.createElement("a");
+      a.href = reelMp4Url;
+      a.download = "short.mp4";
+      a.rel = "noopener";
+      a.click();
+      return;
+    }
+    const jobId = shortJobId?.trim();
+    if (jobId) {
+      const a = document.createElement("a");
+      a.href = shortJobDownloadApiUrl(jobId);
+      a.download = "short.mp4";
+      a.rel = "noopener";
+      a.click();
+    }
+  }, [shortOutputFile, reelMp4Url, shortJobId]);
 
   const youtubeSlides = useMemo(
     () => slidePreviewBase64s ?? [],
@@ -470,9 +569,9 @@ export default function Home() {
     const cap =
       socialCaption.trim().length > 0 ? socialCaption.trim() : fromSlides;
     let initialKind: MetaPublishContentKind = "carousel";
-    if (studioTab === "image" && imagePost?.imageBase64) {
+    if (effectiveStudioTab === "image" && imagePost?.imageBase64) {
       initialKind = "photo";
-    } else if (studioTab === "short" && shortOutputFile) {
+    } else if (effectiveStudioTab === "short" && shortOutputFile) {
       initialKind = "short";
     }
     setMetaPublishKind(initialKind);
@@ -548,6 +647,7 @@ export default function Home() {
     scheduleOpen,
     activeQueueId,
     studioTab,
+    effectiveStudioTab,
     imagePost?.imageBase64,
     imagePost?.caption,
     shortOutputFile,
@@ -832,37 +932,37 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 pb-24">
-      <header className="mb-10 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <ContentMultiplierMark />
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2 self-start">
-          <Link
-            href="/stitch"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm transition hover:border-palette-teal/60 hover:bg-palette-pale/20 hover:text-stone-900"
-          >
-            Stitch
-          </Link>
-          <Link
-            href="/schedule"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm transition hover:border-palette-teal/60 hover:bg-palette-pale/20 hover:text-stone-900"
-          >
-            Calendar
-          </Link>
-          <Link
-            href="/settings"
-            className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm font-medium text-stone-700 shadow-sm transition hover:border-palette-teal/60 hover:bg-palette-pale/20 hover:text-stone-900"
-          >
-            Settings
-          </Link>
-        </div>
-      </header>
-
       {error && (
         <p className="mb-6 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
           {error}
         </p>
       )}
+
+      {mobileClient ? (
+        <p
+          className={`mb-6 rounded-lg border px-3 py-2 text-sm leading-relaxed ${
+            loading || queueHasActiveWork
+              ? "border-violet-200 bg-violet-50 text-violet-950"
+              : "border-stone-200 bg-stone-50 text-stone-600"
+          }`}
+          role="status"
+        >
+          {loading || queueHasActiveWork ? (
+            <>
+              <span className="font-semibold">Phone tip: </span>
+              Keep this tab open and the screen on until processing finishes.
+              Wi‑Fi works best. Uploads run one at a time on mobile for
+              reliability — slower than desktop, but much less likely to fail.
+            </>
+          ) : (
+            <>
+              <span className="font-semibold text-stone-800">On iPhone: </span>
+              use Wi‑Fi, keep Safari in the foreground, and uncheck output
+              formats you don&apos;t need before uploading.
+            </>
+          )}
+        </p>
+      ) : null}
 
       {inFlightShortJob && (
         <div
@@ -875,8 +975,8 @@ export default function Home() {
             <span className="font-medium">
               {inFlightShortJob.sourceName}
             </span>{" "}
-            when this tab last closed. The server has likely finished — download
-            the result without re-uploading?
+            when this tab last closed. The server has likely finished — attach
+            it to this upload?
           </p>
           {recoverShortError && (
             <p className="mb-2 text-xs text-red-700">{recoverShortError}</p>
@@ -888,7 +988,7 @@ export default function Home() {
               disabled={recoveringShort}
               className="rounded-md bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {recoveringShort ? "Recovering…" : "Download Short"}
+              {recoveringShort ? "Recovering…" : "Load Short into studio"}
             </button>
             <button
               type="button"
@@ -928,20 +1028,6 @@ export default function Home() {
               className="space-y-2.5 border-t border-stone-100 px-4 pb-4 pt-2"
               onClick={(e) => e.stopPropagation()}
             >
-              <p className="text-xs leading-relaxed text-stone-500">
-                Uncheck anything you don&apos;t want generated for the next
-                upload. At least one must stay on.
-              </p>
-              <p className="text-xs leading-relaxed text-stone-500">
-                <span className="font-medium text-stone-700">Source video: </span>
-                Carousel and image post always use your{" "}
-                <span className="font-medium text-stone-700">original upload</span>{" "}
-                for keyframes (not the captioned Short MP4). Only{" "}
-                <span className="font-medium text-stone-700">Reel</span> uses Video
-                to Short. If slides still show burned-in captions, the captions were
-                already in the file you uploaded—use a clean master for this queue
-                item.
-              </p>
               <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-800">
                 <input
                   type="checkbox"
@@ -970,17 +1056,19 @@ export default function Home() {
                 />
                 <span>Image post (4:5)</span>
               </label>
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-800">
-                <input
-                  type="checkbox"
-                  checked={studioOutputs.xPost}
-                  onChange={(e) =>
-                    setStudioOutputs((s) => ({ ...s, xPost: e.target.checked }))
-                  }
-                  className="h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
-                />
-                <span>X / Threads post</span>
-              </label>
+              {X_THREADS_OUTPUT_ENABLED ? (
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={studioOutputs.xPost}
+                    onChange={(e) =>
+                      setStudioOutputs((s) => ({ ...s, xPost: e.target.checked }))
+                    }
+                    className="h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
+                  />
+                  <span>X / Threads post</span>
+                </label>
+              ) : null}
               <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-800">
                 <input
                   type="checkbox"
@@ -995,6 +1083,40 @@ export default function Home() {
                 />
                 <span>Reel (Video to Short)</span>
               </label>
+            </div>
+          </details>
+
+          <details className="group rounded-2xl border border-stone-200/80 bg-white text-left shadow-sm [&_summary::-webkit-details-marker]:hidden">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-sm font-semibold text-stone-900 marker:content-none hover:bg-stone-50/80">
+              <span>Studio run notes for the AI (optional)</span>
+              <span
+                className="shrink-0 text-stone-400 transition-transform duration-200 group-open:rotate-180"
+                aria-hidden
+              >
+                ▼
+              </span>
+            </summary>
+            <div
+              className="border-t border-stone-100 px-4 pb-4 pt-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <label htmlFor={carouselFocusFieldId} className="sr-only">
+                Studio run notes for the AI (optional)
+              </label>
+              <textarea
+                id={carouselFocusFieldId}
+                value={carouselFocusDraft}
+                onChange={(e) => onCarouselFocusChange(e.target.value)}
+                rows={6}
+                maxLength={MAX_CAROUSEL_FOCUS_CHARS}
+                placeholder={`e.g. "Carousel: land on [topic] — tie to transcript at ~0:45."\nPhoto: punchy hook + soft CTA.\nX: 4 tweets, no hashtags.\nThreads: mirror X but warmer.\nReel: keep energy high, no new claims."`}
+                className="w-full rounded-lg border border-stone-200 px-3 py-2 text-sm text-stone-900 placeholder:text-stone-400"
+              />
+              <p className="mt-1 text-xs text-stone-400">
+                {carouselFocusDraft.length.toLocaleString()} /{" "}
+                {MAX_CAROUSEL_FOCUS_CHARS.toLocaleString()} · Saved in this
+                browser
+              </p>
             </div>
           </details>
 
@@ -1029,47 +1151,27 @@ export default function Home() {
             </label>
           </div>
 
-          <div className="rounded-2xl border border-stone-200/80 bg-white p-4 text-left shadow-sm">
-            <label
-              htmlFor={carouselFocusFieldId}
-              className="block text-sm font-medium text-stone-800"
-            >
-              Studio run notes for the AI (optional)
-            </label>
-            <textarea
-              id={carouselFocusFieldId}
-              value={carouselFocusDraft}
-              onChange={(e) => onCarouselFocusChange(e.target.value)}
-              rows={6}
-              maxLength={MAX_CAROUSEL_FOCUS_CHARS}
-              placeholder={`e.g. "Carousel: land on [topic] — tie to transcript at ~0:45."\nPhoto: punchy hook + soft CTA.\nX: 4 tweets, no hashtags.\nThreads: mirror X but warmer.\nReel: keep energy high, no new claims."`}
-              className="mt-2 w-full rounded-lg border border-stone-200 px-3 py-2 text-sm text-stone-900 placeholder:text-stone-400"
-            />
-            <p className="mt-1 text-xs text-stone-400">
-              {carouselFocusDraft.length.toLocaleString()} /{" "}
-              {MAX_CAROUSEL_FOCUS_CHARS.toLocaleString()} · Saved in this browser
-            </p>
-          </div>
-
           <div className="mx-auto w-full max-w-full space-y-3 lg:max-w-none">
             {queue.length > 0 ? (
               <div className="max-h-[min(52vh,22rem)] space-y-3 overflow-y-auto pr-0.5">
                 {queue.map((item) => {
                   const isActive = item.id === activeQueueId;
-                  const label =
-                    item.file.name.length > 36
-                      ? `${item.file.name.slice(0, 34)}…`
-                      : item.file.name;
+                  const handleRename = (id: string, displayLabel: string) => {
+                    renameQueueItem(id, displayLabel);
+                    syncTitlesForQueueItem(
+                      id,
+                      displayLabel.trim() || undefined,
+                      item.file.name
+                    );
+                  };
                   return (
-                    <button
+                    <div
                       key={item.id}
-                      type="button"
                       title={
                         item.status === "error" && item.error
                           ? item.error
-                          : item.file.name
+                          : `${queueItemDisplayLabel(item)} (${item.file.name})`
                       }
-                      onClick={() => selectQueueItem(item.id)}
                       className={`flex w-full flex-col gap-2 rounded-2xl border p-3 text-left shadow-sm transition ${
                         isActive
                           ? "border-palette-teal bg-palette-pale/25 ring-2 ring-palette-pale/50"
@@ -1077,34 +1179,64 @@ export default function Home() {
                       }`}
                     >
                       <div className="flex min-w-0 items-start justify-between gap-2">
-                        <span
-                          className="min-w-0 flex-1 truncate text-sm font-medium text-stone-900"
-                          title={item.file.name}
-                        >
-                          {label}
-                        </span>
-                        <span
-                          className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                            item.status === "done"
-                              ? "bg-palette-pale/35 text-palette-depth"
-                              : item.status === "processing"
+                        <QueueItemEditableTitle
+                          item={item}
+                          onSelect={() => selectQueueItem(item.id)}
+                          onRename={handleRename}
+                        />
+                        <div className="flex shrink-0 items-center gap-1">
+                          <span
+                            className={`rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                              item.status === "done"
                                 ? "bg-palette-pale/35 text-palette-depth"
-                                : item.status === "error"
-                                  ? "bg-red-100 text-red-800"
-                                  : "bg-stone-200 text-stone-600"
-                          }`}
-                        >
-                          {item.status === "pending"
-                            ? "Waiting"
-                            : item.status === "processing"
-                              ? "Processing"
-                              : item.status === "done"
-                                ? "Done"
-                                : "Error"}
-                        </span>
+                                : item.status === "processing"
+                                  ? "bg-palette-pale/35 text-palette-depth"
+                                  : item.status === "error"
+                                    ? "bg-red-100 text-red-800"
+                                    : "bg-stone-200 text-stone-600"
+                            }`}
+                          >
+                            {item.status === "pending"
+                              ? "Waiting"
+                              : item.status === "processing"
+                                ? "Processing"
+                                : item.status === "done"
+                                  ? "Done"
+                                  : "Error"}
+                          </span>
+                          {item.status === "done" ||
+                          item.status === "error" ||
+                          item.status === "processing" ||
+                          item.status === "pending" ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeQueueItem(item.id);
+                              }}
+                              aria-label={
+                                item.status === "processing"
+                                  ? `Cancel processing and remove ${queueItemDisplayLabel(item)} from queue`
+                                  : `Remove ${queueItemDisplayLabel(item)} from queue`
+                              }
+                              title={
+                                item.status === "processing"
+                                  ? "Cancel and remove"
+                                  : "Remove from queue"
+                              }
+                              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-sm leading-none text-stone-400 transition hover:bg-stone-200/80 hover:text-stone-700"
+                            >
+                              ×
+                            </button>
+                          ) : null}
+                        </div>
                       </div>
-                      {item.status === "processing" && (
-                        <>
+                      {item.status === "processing" ? (
+                        <button
+                          type="button"
+                          onClick={() => selectQueueItem(item.id)}
+                          className="flex w-full flex-col gap-2 text-left"
+                        >
                           <div
                             className="h-0.5 w-full overflow-hidden rounded-full bg-stone-200"
                             aria-hidden
@@ -1119,9 +1251,9 @@ export default function Home() {
                               {item.progress}
                             </p>
                           ) : null}
-                        </>
-                      )}
-                    </button>
+                        </button>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>
@@ -1164,17 +1296,71 @@ export default function Home() {
               role="status"
               aria-live="polite"
             >
-              <span className="sr-only">Processing video, please wait.</span>
+              <span className="sr-only">
+                {activeQueueItem?.progress
+                  ? `Processing: ${activeQueueItem.progress}`
+                  : "Processing video, please wait."}
+              </span>
               <div
                 className="mb-5 h-14 w-14 rounded-full border-[3px] border-palette-pale/80 border-t-palette-depth animate-spin"
                 aria-hidden
               />
               <p className="text-base font-medium text-stone-800">
-                Creating your posts
+                {activeQueueItem?.progress ?? "Creating your posts"}
               </p>
-              <p className="mt-2 max-w-xs text-sm text-stone-600">
-                This can take a moment
+              <p className="mt-2 max-w-md text-sm text-stone-600">
+                {activeQueueItem?.progress
+                  ? "Video to Short, carousel, and image post run in parallel when enabled — this line updates as each step advances."
+                  : "Starting pipeline…"}
               </p>
+              {studioOutputs.reelShort ||
+              studioOutputs.carousel ||
+              studioOutputs.imagePost ||
+              (X_THREADS_OUTPUT_ENABLED && studioOutputs.xPost) ? (
+                <ul className="mt-5 max-w-sm space-y-1.5 text-left text-xs text-stone-500">
+                  {studioOutputs.reelShort ? (
+                    <li>
+                      <span className="font-medium text-stone-700">Short video</span>
+                      {activeQueueItem?.progress?.toLowerCase().includes("short") ||
+                      activeQueueItem?.progress?.toLowerCase().includes("video to short")
+                        ? " — in progress"
+                        : activeQueueItem?.progress?.includes("Generating")
+                          ? " — queued"
+                          : ""}
+                    </li>
+                  ) : null}
+                  {studioOutputs.carousel ? (
+                    <li>
+                      <span className="font-medium text-stone-700">Carousel</span>
+                      {activeQueueItem?.progress?.toLowerCase().includes("carousel")
+                        ? " — in progress"
+                        : activeQueueItem?.progress?.includes("Generating")
+                          ? " — queued"
+                          : ""}
+                    </li>
+                  ) : null}
+                  {studioOutputs.imagePost ? (
+                    <li>
+                      <span className="font-medium text-stone-700">Image post</span>
+                      {activeQueueItem?.progress?.toLowerCase().includes("image post")
+                        ? " — in progress"
+                        : activeQueueItem?.progress?.includes("Generating")
+                          ? " — queued"
+                          : ""}
+                    </li>
+                  ) : null}
+                  {X_THREADS_OUTPUT_ENABLED && studioOutputs.xPost ? (
+                    <li>
+                      <span className="font-medium text-stone-700">X / Threads</span>
+                      {activeQueueItem?.progress?.toLowerCase().includes("x/threads")
+                        ? " — in progress"
+                        : activeQueueItem?.progress?.includes("Generating")
+                          ? " — queued"
+                          : ""}
+                    </li>
+                  ) : null}
+                </ul>
+              ) : null}
             </div>
           ) : !hasProcessed ? (
             <div className="flex flex-1 flex-col items-center justify-center px-2 text-center">
@@ -1213,10 +1399,10 @@ export default function Home() {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={studioTab === "carousel"}
+                  aria-selected={effectiveStudioTab === "carousel"}
                   onClick={() => setStudioTab("carousel")}
                   className={`min-w-0 flex-1 rounded-md px-2 py-2 transition sm:px-2.5 ${
-                    studioTab === "carousel"
+                    effectiveStudioTab === "carousel"
                       ? "bg-white text-palette-depth shadow-sm"
                       : "text-stone-600 hover:text-stone-900"
                   }`}
@@ -1226,37 +1412,39 @@ export default function Home() {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={studioTab === "image"}
+                  aria-selected={effectiveStudioTab === "image"}
                   onClick={() => setStudioTab("image")}
                   className={`min-w-0 flex-1 rounded-md px-2 py-2 transition sm:px-2.5 ${
-                    studioTab === "image"
+                    effectiveStudioTab === "image"
                       ? "bg-white text-palette-depth shadow-sm"
                       : "text-stone-600 hover:text-stone-900"
                   }`}
                 >
                   Image post
                 </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={studioTab === "social"}
-                  onClick={() => setStudioTab("social")}
-                  className={`min-w-0 flex-1 rounded-md px-2 py-2 transition sm:px-2.5 ${
-                    studioTab === "social"
-                      ? "bg-white text-palette-depth shadow-sm"
-                      : "text-stone-600 hover:text-stone-900"
-                  }`}
-                >
-                  X / Threads
-                </button>
+                {X_THREADS_OUTPUT_ENABLED ? (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={effectiveStudioTab === "social"}
+                    onClick={() => setStudioTab("social")}
+                    className={`min-w-0 flex-1 rounded-md px-2 py-2 transition sm:px-2.5 ${
+                      effectiveStudioTab === "social"
+                        ? "bg-white text-palette-depth shadow-sm"
+                        : "text-stone-600 hover:text-stone-900"
+                    }`}
+                  >
+                    X / Threads
+                  </button>
+                ) : null}
                 {shortOutputTabVisible ? (
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={studioTab === "short"}
+                    aria-selected={effectiveStudioTab === "short"}
                     onClick={() => setStudioTab("short")}
                     className={`min-w-0 flex-1 rounded-md px-2 py-2 transition sm:px-2.5 ${
-                      studioTab === "short"
+                      effectiveStudioTab === "short"
                         ? "bg-white text-palette-depth shadow-sm"
                         : "text-stone-600 hover:text-stone-900"
                     }`}
@@ -1266,15 +1454,16 @@ export default function Home() {
                 ) : null}
               </div>
 
-              {shortReprocessBusy && studioTab !== "short" ? (
+              {shortReprocessBusy && effectiveStudioTab !== "short" ? (
                 <p
                   className="mb-3 shrink-0 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-relaxed text-sky-950"
                   role="status"
                   aria-live="polite"
                 >
                   <span className="font-semibold">Short is re-processing</span>{" "}
-                  in the background. You can keep working on the carousel, image
-                  post, or X / Threads tab; open the{" "}
+                  in the background. You can keep working on the carousel
+                  {X_THREADS_OUTPUT_ENABLED ? ", image post, or X / Threads tab" : " or image post tab"}
+                  ; open the{" "}
                   <button
                     type="button"
                     className="font-semibold text-palette-depth underline decoration-palette-depth/40 underline-offset-2 hover:text-stone-900"
@@ -1287,7 +1476,7 @@ export default function Home() {
               ) : null}
 
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-                {studioTab === "carousel" ? (
+                {effectiveStudioTab === "carousel" ? (
                   <div className="space-y-6">
                     <div className="flex items-start justify-between gap-3">
                       <h2 className="text-lg font-medium text-stone-900">
@@ -1332,7 +1521,26 @@ export default function Home() {
                         </div>
                       )}
                     </div>
-                    <div className="flex flex-col items-center">
+                    <div className="relative flex flex-col items-center">
+                      {reRenderLoading ? (
+                        <div
+                          className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-white/85 px-4 text-center backdrop-blur-[2px]"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          <div
+                            className="mb-3 h-10 w-10 rounded-full border-[3px] border-palette-pale/80 border-t-palette-depth animate-spin"
+                            aria-hidden
+                          />
+                          <p className="text-sm font-medium text-stone-800">
+                            Updating carousel
+                          </p>
+                          <p className="mt-1 max-w-xs text-xs text-stone-600">
+                            {reRenderProgress ??
+                              "Your preview will refresh when it\u2019s ready."}
+                          </p>
+                        </div>
+                      ) : null}
                       {previewImages.length > 0 ? (
                         <CarouselSlideViewer
                           slideBase64s={previewImages}
@@ -1402,21 +1610,21 @@ export default function Home() {
                       </CollapsibleSection>
                     ) : null}
                   </div>
-                ) : studioTab === "image" ? (
+                ) : effectiveStudioTab === "image" ? (
                   <div>
                     <h2 className="mb-4 text-lg font-medium text-stone-900">
                       Image post
                     </h2>
                     <ImagePostStudioPanel />
                   </div>
-                ) : studioTab === "social" ? (
+                ) : effectiveStudioTab === "social" ? (
                   <div>
                     <h2 className="mb-4 text-lg font-medium text-stone-900">
                       X / Threads
                     </h2>
                     <SocialMicroPanel />
                   </div>
-                ) : (
+                ) : effectiveStudioTab === "short" ? (
                   <div className="space-y-4">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
@@ -1431,15 +1639,34 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={downloadShortMp4}
-                        disabled={shortReprocessBusy}
+                        disabled={shortReprocessBusy || !shortPreviewUrl}
                         className="shrink-0 rounded-lg border border-palette-moss bg-white px-3 py-2 text-xs font-semibold text-palette-moss shadow-sm transition hover:bg-palette-pale/40 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         Download MP4
                       </button>
                     </div>
 
+                    {shortError ? (
+                      <p
+                        className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-relaxed text-amber-950"
+                        role="status"
+                      >
+                        <span className="font-semibold">Reel: </span>
+                        {shortError}
+                        {inFlightShortJob &&
+                        file &&
+                        inFlightShortJob.sourceName === file.name ? (
+                          <>
+                            {" "}
+                            A Short may still be running — use the recovery banner
+                            at the top to load it into the studio when ready.
+                          </>
+                        ) : null}
+                      </p>
+                    ) : null}
+
                     <div className="relative">
-                      {shortReprocessBusy ? (
+                      {shortResumeBusy || shortReprocessBusy ? (
                         <div
                           className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-xl bg-white/80 backdrop-blur-sm"
                           role="status"
@@ -1450,7 +1677,9 @@ export default function Home() {
                             aria-hidden
                           />
                           <p className="text-sm font-medium text-stone-800">
-                            Re-processing short…
+                            {shortReprocessBusy
+                              ? "Re-processing short…"
+                              : shortResumeMessage || "Loading reel…"}
                           </p>
                         </div>
                       ) : null}
@@ -1464,6 +1693,13 @@ export default function Home() {
                         >
                           Your browser does not support embedded video.
                         </video>
+                      ) : shortJobId || shortError ? (
+                        <p className="text-sm text-stone-600">
+                          {shortResumeBusy
+                            ? shortResumeMessage ||
+                              "Reel is still processing on the server…"
+                            : "Preparing preview…"}
+                        </p>
                       ) : (
                         <p className="text-sm text-stone-600">Preparing preview…</p>
                       )}
@@ -1588,10 +1824,10 @@ export default function Home() {
                       </div>
                     </details>
                   </div>
-                )}
+                ) : null}
               </div>
 
-              {studioTab === "carousel" ? (
+              {effectiveStudioTab === "carousel" ? (
                 <div className="shrink-0 border-t border-stone-200 pt-4">
                   <RefinePanel
                     hideZipDownload

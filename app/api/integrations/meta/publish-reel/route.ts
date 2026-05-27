@@ -6,7 +6,10 @@ import {
 import { getMaxReelUploadBytes } from "@/lib/meta/publish-limits";
 import { getMetaEnv } from "@/lib/meta/publish";
 import { publishReelToMeta } from "@/lib/meta/publish-reel";
-import { parseScheduledField } from "@/lib/meta/parse-scheduled-field";
+import {
+  parseScheduledField,
+  futureScheduledOrUndefined,
+} from "@/lib/meta/parse-scheduled-field";
 import { stripEmDashes } from "@/lib/strip-em-dash";
 
 export const runtime = "nodejs";
@@ -92,8 +95,13 @@ export async function POST(request: Request) {
     );
   }
 
-  const scheduledPublishTime = parseScheduledField(
-    String(form.get("scheduledPublishTime") ?? "").trim() || undefined
+  // A scheduled time in the past (or within ~10 min) means "publish now":
+  // don't forward it to Meta, or Instagram rejects it as a (non-allowlisted)
+  // native-schedule request. Mirrors /api/schedule/publish-now.
+  const scheduledPublishTime = futureScheduledOrUndefined(
+    parseScheduledField(
+      String(form.get("scheduledPublishTime") ?? "").trim() || undefined
+    )
   );
 
   let buf: Buffer;

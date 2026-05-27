@@ -49,6 +49,7 @@ export function RefinePanel({
     updateSlide,
     removeSlide,
     addSlide,
+    moveSlide,
     reRenderLoading,
     file,
     fileInputRef,
@@ -57,6 +58,9 @@ export function RefinePanel({
     downloadZip,
     zipBase64,
   } = useCarouselWorkspace();
+
+  const [dragFromIndex, setDragFromIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const panel = (
     <div className="space-y-6">
@@ -115,37 +119,136 @@ export function RefinePanel({
         >
           {editableSlides.length > 0 ? (
             <div>
+              <p className="mb-4 text-xs text-stone-500">
+                Drag the handle or use the arrows to reorder slides.
+              </p>
               <div className="space-y-6">
                 {editableSlides.map((s, i) => (
-                  <div key={s.order}>
-                    <div className="mb-2 flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold text-stone-800">
-                        Slide {i + 1}:
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => removeSlide(i)}
-                        className="shrink-0 rounded-md p-1.5 text-stone-400 transition hover:bg-red-50 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/35"
-                        aria-label={`Delete slide ${i + 1}`}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          className="h-5 w-5"
-                          aria-hidden
+                  <div
+                    key={s.order}
+                    className={`rounded-lg transition-colors ${
+                      dragOverIndex === i && dragFromIndex !== i
+                        ? "bg-stone-50 ring-2 ring-palette-moss/35"
+                        : ""
+                    }`}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      if (dragFromIndex !== null && dragFromIndex !== i) {
+                        setDragOverIndex(i);
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverIndex === i) setDragOverIndex(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (dragFromIndex !== null && dragFromIndex !== i) {
+                        moveSlide(dragFromIndex, i);
+                      }
+                      setDragFromIndex(null);
+                      setDragOverIndex(null);
+                    }}
+                  >
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <button
+                          type="button"
+                          draggable
+                          onDragStart={() => setDragFromIndex(i)}
+                          onDragEnd={() => {
+                            setDragFromIndex(null);
+                            setDragOverIndex(null);
+                          }}
+                          className="shrink-0 cursor-grab rounded-md p-1.5 text-stone-400 transition hover:bg-stone-100 hover:text-stone-600 active:cursor-grabbing focus:outline-none focus-visible:ring-2 focus-visible:ring-palette-moss/35"
+                          aria-label={`Drag to reorder slide ${i + 1}`}
                         >
-                          <path d="M3 6h18" />
-                          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                          <line x1="10" x2="10" y1="11" y2="17" />
-                          <line x1="14" x2="14" y1="11" y2="17" />
-                        </svg>
-                      </button>
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            className="h-5 w-5"
+                            aria-hidden
+                          >
+                            <circle cx="9" cy="7" r="1.5" />
+                            <circle cx="15" cy="7" r="1.5" />
+                            <circle cx="9" cy="12" r="1.5" />
+                            <circle cx="15" cy="12" r="1.5" />
+                            <circle cx="9" cy="17" r="1.5" />
+                            <circle cx="15" cy="17" r="1.5" />
+                          </svg>
+                        </button>
+                        <p className="text-sm font-semibold text-stone-800">
+                          Slide {i + 1}:
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <button
+                          type="button"
+                          disabled={i === 0}
+                          onClick={() => moveSlide(i, i - 1)}
+                          className="rounded-md p-1.5 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700 disabled:pointer-events-none disabled:opacity-30 focus:outline-none focus-visible:ring-2 focus-visible:ring-palette-moss/35"
+                          aria-label={`Move slide ${i + 1} up`}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className="h-4 w-4"
+                            aria-hidden
+                          >
+                            <path d="m18 15-6-6-6 6" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={i === editableSlides.length - 1}
+                          onClick={() => moveSlide(i, i + 1)}
+                          className="rounded-md p-1.5 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700 disabled:pointer-events-none disabled:opacity-30 focus:outline-none focus-visible:ring-2 focus-visible:ring-palette-moss/35"
+                          aria-label={`Move slide ${i + 1} down`}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className="h-4 w-4"
+                            aria-hidden
+                          >
+                            <path d="m6 9 6 6 6-6" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeSlide(i)}
+                          className="rounded-md p-1.5 text-stone-400 transition hover:bg-red-50 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/35"
+                          aria-label={`Delete slide ${i + 1}`}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className="h-5 w-5"
+                            aria-hidden
+                          >
+                            <path d="M3 6h18" />
+                            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                            <line x1="10" x2="10" y1="11" y2="17" />
+                            <line x1="14" x2="14" y1="11" y2="17" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
                     <label
                       className="sr-only"
@@ -191,7 +294,9 @@ export function RefinePanel({
               <button
                 type="button"
                 disabled={
-                  reRenderLoading || !(file ?? fileInputRef.current?.files?.[0])
+                  loading ||
+                  reRenderLoading ||
+                  !(file ?? fileInputRef.current?.files?.[0])
                 }
                 onClick={() => void reRenderZip()}
                 className="mt-3 w-full rounded-xl border border-stone-300 bg-stone-200 py-3 text-sm font-semibold text-stone-900 hover:bg-stone-300 disabled:opacity-50"

@@ -19,26 +19,11 @@
 
 import { clientApiPath } from "@/lib/client-api-path";
 import { fetchJobPollState } from "@/lib/run-video-to-short";
+import { uploadFileToBunnyStorage } from "@/lib/storage/bunny-upload-client";
 
 const POLL_MS = 1500;
 const MAX_WAIT_MS = 30 * 60 * 1000; // 30 min ceiling per row.
-
-async function mintStitchUploadToken(): Promise<{ token: string; url: string }> {
-  const res = await fetch(clientApiPath("/api/stitch/upload-token"), {
-    method: "POST",
-  });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body?.error) detail = body.error;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(`Could not get upload token: ${detail}`);
-  }
-  return (await res.json()) as { token: string; url: string };
-}
+const BUNNY_UPLOAD_ATTEMPTS = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -62,22 +47,45 @@ export async function uploadStitchRow(
     throw new Error("No clips to stitch.");
   }
 
-  const fd = new FormData();
-  for (const c of clips) {
-    fd.append("files", c, c.name);
+  // Upload each clip straight to Bunny's edge first. The big byte transfer is
+  // now decoupled from the backend call (a tiny JSON POST below), so a
+  // backgrounded tab or network blip can no longer orphan the job: either the
+  // Bunny upload lands and we create a job, or it fails cleanly with no phantom
+  // "processing" row. Retry a few times to ride out transient blips.
+  const fileUrls: string[] = [];
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i]!;
+    const safe =
+      clip.name.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/^_+/, "") ||
+      `clip_${i}.mp4`;
+    let bunnyUrl: string | null = null;
+    let lastErr = "";
+    for (let attempt = 1; attempt <= BUNNY_UPLOAD_ATTEMPTS; attempt++) {
+      bunnyUrl = await uploadFileToBunnyStorage(clip, {
+        filename: `stitch-src/${correlationId}-${i}-${safe}`,
+        contentType: clip.type || "video/mp4",
+      });
+      if (bunnyUrl) break;
+      lastErr = `attempt ${attempt}/${BUNNY_UPLOAD_ATTEMPTS} failed`;
+      if (attempt < BUNNY_UPLOAD_ATTEMPTS) await sleep(1000 * attempt);
+    }
+    if (!bunnyUrl) {
+      throw new Error(
+        `Could not upload clip "${clip.name}" to storage (${lastErr}). Check your connection and try again.`
+      );
+    }
+    fileUrls.push(bunnyUrl);
   }
-  fd.append("client_correlation_id", correlationId);
-
-  // Mint per-call: a multi-row batch can outlive a single 30-min token, and
-  // minting is cheap (single HMAC).
-  const { token, url } = await mintStitchUploadToken();
 
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(clientApiPath("/api/video-to-short/stitch-url"), {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: fd,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file_urls: fileUrls,
+        client_correlation_id: correlationId,
+      }),
     });
   } catch (e) {
     // Network blip — caller should attempt correlation-id recovery before

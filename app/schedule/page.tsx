@@ -1,20 +1,32 @@
 "use client";
 
-import { ContentMultiplierHomeLink } from "@/app/components/ContentMultiplierMark";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ExternalCalendarVideosPanel,
+  ExternalVideoPickRow,
+} from "@/app/components/schedule/ExternalCalendarVideosPanel";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   useCarouselWorkspace,
   type QueueCarouselSnapshot,
+  type VideoQueueItem,
 } from "@/context/carousel-workspace-context";
 import { useScheduleStore, type ScheduledCarouselPost } from "@/context/schedule-context";
 import {
   type ScheduleContentKind,
   displayHookForSchedule,
+  scheduleTitleForQueueItem,
+  defaultScheduleKindForQueue,
+  queueHasSchedulableOutput,
   downscalePngBase64ToJpegDataUrl,
+  photoAssetReadyForSchedule,
   pickPhotoPreviewPngsForCalendar,
   pickSlidePreviewPngsForCalendar,
   slideCountForCalendar,
 } from "@/lib/schedule/calendar-preview-thumbs";
+import {
+  queueItemDisplayLabel,
+  queueItemScheduleLabel,
+} from "@/lib/queue-display-label";
 import {
   postMetaCarouselPublish,
   postMetaReelPublish,
@@ -22,51 +34,185 @@ import {
 import type { DaemonScheduleEntry } from "@/lib/schedule/daemon-schema";
 import {
   fetchDaemonStatuses,
-  syncDaemonDelete,
-  syncDaemonUpsert,
-  syncDaemonUpsertReel,
+  publishNowViaDaemon,
   type DaemonPublishRowStatus,
 } from "@/lib/schedule/daemon-client";
 import {
+  bunnySlideUrlsForMetaPublish,
   captionFromImagePostSnapshot,
   captionFromSnapshot,
   imagePostSlideForMeta,
   slidesForMetaFromZipOrSnapshot,
 } from "@/lib/schedule/slides-for-meta-from-snapshot";
 import { clientApiPath } from "@/lib/client-api-path";
+import {
+  coerceFirstCommentField,
+  getDefaultFirstCommentFromStorage,
+  MAX_DEFAULT_FIRST_COMMENT_CHARS,
+} from "@/lib/default-first-comment";
+import {
+  displayHookFromExternalVideo,
+  externalVideoLabel,
+  filterExternalCalendarVideos,
+  parseScheduleDragPayload,
+  uploadExternalCalendarReel,
+  type ExternalCalendarVideo,
+} from "@/lib/schedule/external-calendar-video";
 import { postYoutubeShortPublish } from "@/lib/youtube/publish-youtube-client";
 
 const DRAG_MIME = "application/x-video-studio-queue-id";
 
-function parseScheduleDrag(
-  raw: string
-): { queueItemId: string; scheduleKind: ScheduleContentKind } | null {
-  if (!raw) return null;
-  const t = raw.trim();
-  if (t.startsWith("{")) {
-    try {
-      const j = JSON.parse(t) as {
-        queueItemId?: string;
-        scheduleKind?: string;
-      };
-      const id = j.queueItemId;
-      const k = j.scheduleKind;
-      if (
-        typeof id === "string" &&
-        id.length > 0 &&
-        (k === "carousel" || k === "photo" || k === "short")
-      ) {
-        return { queueItemId: id, scheduleKind: k };
-      }
-    } catch {
-      return null;
-    }
-    return null;
+function applyModalKindDefaults(
+  kind: ScheduleContentKind,
+  snap: QueueCarouselSnapshot | null,
+  setModalCaption: (v: string) => void,
+  setPostIg: (v: boolean) => void,
+  setPostFb: (v: boolean) => void,
+  setPostYt: (v: boolean) => void,
+  youtubeReady: boolean
+): void {
+  if (kind === "photo" && snap) {
+    setModalCaption(captionFromImagePostSnapshot(snap));
+  } else if (kind === "short" && snap) {
+    const c = snap.socialCaption?.trim();
+    setModalCaption(
+      c && c.length > 0
+        ? c
+        : captionFromImagePostSnapshot(snap) || captionFromSnapshot(snap)
+    );
+  } else {
+    setModalCaption(snap ? captionFromSnapshot(snap) : "");
   }
-  if (/^[0-9a-f-]{36}$/i.test(t)) {
-    return { queueItemId: t, scheduleKind: "carousel" };
+  if (kind === "carousel" && snap) {
+    const anySlides =
+      pickSlidePreviewPngsForCalendar(snap, true, true).length > 0;
+    setPostIg(anySlides);
+    setPostFb(anySlides);
+  } else {
+    setPostIg(true);
+    setPostFb(true);
   }
-  return null;
+  setPostYt(kind === "short" && youtubeReady);
+}
+
+type ReadyToScheduleRowProps = {
+  q: VideoQueueItem;
+  snap: QueueCarouselSnapshot | null;
+  mode: "drag" | "pick";
+  onPick?: () => void;
+  /** Flushes the active editor row before drag/pick checks. */
+  resolveSnapshot?: (queueItemId: string) => QueueCarouselSnapshot | null;
+};
+
+function ReadyToScheduleVideoRow({
+  q,
+  snap,
+  mode,
+  onPick,
+  resolveSnapshot,
+}: ReadyToScheduleRowProps) {
+  const carThumb = snap?.firstSlidePreviewBase64 ?? null;
+  const phB64 = snap?.imagePost?.imageBase64;
+  const photoReady = typeof phB64 === "string" && phB64.length > 0;
+  const carouselReady =
+    Boolean(snap?.zipBase64) &&
+    pickSlidePreviewPngsForCalendar(snap, true, true).length > 0;
+  const shortReady = Boolean(q.shortOutputFile);
+  const canSchedule = queueHasSchedulableOutput(snap, q);
+  const title = queueItemDisplayLabel(q);
+  const outputHints = [
+    carouselReady && "Carousel",
+    photoReady && "Photo",
+    shortReady && "Short",
+  ].filter(Boolean) as string[];
+
+  const thumb = carThumb ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={`data:image/png;base64,${carThumb}`}
+      alt=""
+      className="h-12 w-12 shrink-0 rounded-lg border border-stone-200 object-cover"
+    />
+  ) : photoReady ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={`data:image/png;base64,${phB64}`}
+      alt=""
+      className="h-12 w-12 shrink-0 rounded-lg border border-stone-200 object-cover"
+    />
+  ) : shortReady ? (
+    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-[10px] font-semibold text-white">
+      ▶
+    </div>
+  ) : (
+    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-stone-200 text-xs text-stone-500">
+      …
+    </div>
+  );
+
+  const body = (
+    <>
+      {thumb}
+      <div className="min-w-0 flex-1 text-left">
+        <p className="truncate text-sm font-medium text-stone-800">{title}</p>
+        {outputHints.length > 0 ? (
+          <p className="mt-0.5 text-[10px] text-stone-500">
+            {outputHints.join(" · ")}
+          </p>
+        ) : (
+          <p className="mt-0.5 text-[10px] text-stone-500">
+            Open on Multiplier to generate outputs
+          </p>
+        )}
+      </div>
+    </>
+  );
+
+  const freshSnap = () => resolveSnapshot?.(q.id) ?? snap;
+
+  if (mode === "pick") {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          if (!queueHasSchedulableOutput(freshSnap(), q)) return;
+          onPick?.();
+        }}
+        className={`flex w-full items-center gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-2 text-left transition ${
+          canSchedule
+            ? "hover:border-palette-teal/40 hover:bg-palette-pale/20"
+            : "cursor-not-allowed opacity-60"
+        }`}
+      >
+        {body}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      draggable={canSchedule}
+      onDragStart={(e) => {
+        if (!queueHasSchedulableOutput(freshSnap(), q)) {
+          e.preventDefault();
+          return;
+        }
+        e.dataTransfer.setData(
+          DRAG_MIME,
+          JSON.stringify({ queueItemId: q.id })
+        );
+        e.dataTransfer.setData("text/plain", queueItemScheduleLabel(q));
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      className={`flex items-center gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-2 ${
+        canSchedule
+          ? "cursor-grab active:cursor-grabbing"
+          : "cursor-not-allowed opacity-60"
+      }`}
+    >
+      {body}
+    </div>
+  );
 }
 
 function startOfMonth(d: Date): Date {
@@ -303,10 +449,66 @@ type PublishEntryResult =
       instagramMediaId?: string;
       facebookPostId?: string;
       youtubeVideoId?: string;
+      firstCommentErrors?: string[];
+      firstCommentDeferred?: boolean;
+      /** Client upload path used; Bunny assets required for server first-comment. */
+      firstCommentSkipped?: boolean;
     }
   | { ok: false; message: string };
 
-/** One scheduled row → Meta (same behavior as single Send). */
+function entryHasBunnyAssetsForPublish(
+  entry: ScheduledCarouselPost,
+  kind: ScheduleContentKind
+): boolean {
+  const u = entry.bunnyUrls;
+  if (kind === "short") return !!u?.reelMp4Url?.trim();
+  if (kind === "photo") return !!u?.imagePostUrl?.trim();
+  const slides = bunnySlideUrlsForMetaPublish(
+    u,
+    entry.postToInstagram,
+    entry.postToFacebook,
+    "carousel",
+  );
+  return (slides?.length ?? 0) > 0;
+}
+
+function mapDaemonPublishResult(
+  r: Awaited<ReturnType<typeof publishNowViaDaemon>>
+): PublishEntryResult {
+  if (!r.ok) return { ok: false, message: r.message };
+  return {
+    ok: true,
+    instagramMediaId: r.instagramMediaId,
+    facebookPostId: r.facebookPostId,
+    youtubeVideoId: r.youtubeVideoId,
+    ...(r.firstCommentErrors?.length
+      ? { firstCommentErrors: r.firstCommentErrors }
+      : {}),
+    ...(r.firstCommentDeferred ? { firstCommentDeferred: true } : {}),
+  };
+}
+
+function firstCommentPublishNote(r: Extract<PublishEntryResult, { ok: true }>): string | null {
+  if (r.firstCommentDeferred) {
+    return "First comment was not posted yet (post is scheduled on Meta — it will not appear until the post is live).";
+  }
+  if (r.firstCommentErrors?.length) {
+    return `Published, but first comment failed: ${r.firstCommentErrors.join(" ")}`;
+  }
+  if (r.firstCommentSkipped) {
+    return "Published, but first comment was not sent. Open the video on the home page so assets upload to Bunny, then publish again or wait for the scheduled time.";
+  }
+  return null;
+}
+
+/**
+ * Manual "Send to Meta" for one calendar row. Carousel/photo slides and short reels
+ * live only in browser memory (home-page workspace), so when the user has removed
+ * the video from the queue or reloaded since scheduling, the in-memory snapshot is
+ * gone. In that case we fall back to the server's persisted slides / reel via
+ * `publishNowViaDaemon`, which reads from `.data/daemon-schedule.json` and
+ * `.data/daemon-reels/{id}.mp4` — the same data the launchd daemon already uses.
+ */
 async function runPublishEntryToMeta(
   entry: ScheduledCarouselPost,
   resolveSnapshot: (queueItemId: string) => QueueCarouselSnapshot | null,
@@ -314,15 +516,29 @@ async function runPublishEntryToMeta(
 ): Promise<PublishEntryResult> {
   const snap = resolveSnapshot(entry.queueItemId);
   const kind = scheduleItemKind(entry);
+  const firstCommentText = coerceFirstCommentField(entry.firstComment);
+  if (
+    firstCommentText &&
+    entryHasBunnyAssetsForPublish(entry, kind)
+  ) {
+    return mapDaemonPublishResult(
+      await publishNowViaDaemon(entry.id, {
+        scheduledPublishTime: entry.publishAtUnix,
+      })
+    );
+  }
+  const firstCommentSkipped =
+    !!firstCommentText && !entryHasBunnyAssetsForPublish(entry, kind);
   let slides: string[];
   if (kind === "short") {
     const vid = getShortFile(entry.queueItemId) ?? undefined;
     if (!vid) {
-      return {
-        ok: false,
-        message:
-          "Short MP4 is not in memory. Open this video on the home page in the same session (or re-run processing) so the reel file is available, then send again.",
-      };
+      // No reel file in memory — let the server publish from the stored MP4.
+      return mapDaemonPublishResult(
+        await publishNowViaDaemon(entry.id, {
+          scheduledPublishTime: entry.publishAtUnix,
+        })
+      );
     }
     const wantsMeta = entry.postToInstagram || entry.postToFacebook;
     const wantsYt = entry.postToYouTube === true;
@@ -419,31 +635,27 @@ async function runPublishEntryToMeta(
       instagramMediaId,
       facebookPostId,
       youtubeVideoId,
+      ...(firstCommentSkipped ? { firstCommentSkipped: true } : {}),
     };
   }
   if (kind === "photo") {
-    if (!snap) {
-      return {
-        ok: false,
-        message:
-          "Snapshot is missing. Open this video on the home page and try again.",
-      };
-    }
-    slides = imagePostSlideForMeta(snap);
+    slides = snap ? imagePostSlideForMeta(snap) : [];
     if (slides.length === 0) {
-      return {
-        ok: false,
-        message:
-          "Single-image post is missing. Open this video on the home page and ensure the image post generated.",
-      };
+      // No in-memory JPEG — publish from Bunny URL on the schedule row (Hub).
+      return mapDaemonPublishResult(
+        await publishNowViaDaemon(entry.id, {
+          scheduledPublishTime: entry.publishAtUnix,
+        })
+      );
     }
   } else {
     if (!snap) {
-      return {
-        ok: false,
-        message:
-          "Carousel data is missing for this video. Open it on the home page and try again.",
-      };
+      // No in-memory snapshot — fall back to server-persisted slides.
+      return mapDaemonPublishResult(
+        await publishNowViaDaemon(entry.id, {
+          scheduledPublishTime: entry.publishAtUnix,
+        })
+      );
     }
     slides = await slidesForMetaFromZipOrSnapshot(
       snap,
@@ -497,6 +709,7 @@ async function runPublishEntryToMeta(
         : undefined,
     facebookPostId:
       typeof data.facebookPostId === "string" ? data.facebookPostId : undefined,
+    ...(firstCommentSkipped ? { firstCommentSkipped: true } : {}),
   };
 }
 
@@ -557,20 +770,32 @@ export default function SchedulePage() {
     items,
     addScheduled,
     moveScheduled: moveScheduledInStore,
+    updateScheduled,
     removeScheduled: removeScheduledFromStore,
   } = useScheduleStore();
 
   const removeScheduled = useCallback(
     async (id: string) => {
+      // Phase 4.B: Hub is the sole sync target. removeScheduledFromStore
+      // already fires deleteScheduledPostFromHub. The legacy daemon-delete
+      // call to `.data/daemon-schedule.json` is no longer needed; publish-due
+      // reads from the Hub via /api/v1/internal/schedule/due.
       removeScheduledFromStore(id);
-      await syncDaemonDelete(id);
     },
     [removeScheduledFromStore]
   );
 
   const [viewMonth, setViewMonth] = useState(() => startOfMonth(new Date()));
+  const [externalVideos, setExternalVideos] = useState<ExternalCalendarVideo[]>(
+    []
+  );
+  const [scheduleUploadError, setScheduleUploadError] = useState<string | null>(
+    null
+  );
+  const externalUploadInputId = useId();
   const [pendingDrop, setPendingDrop] = useState<{
-    queueItemId: string;
+    queueItemId?: string;
+    externalVideoId?: string;
     videoLabel: string;
     year: number;
     monthIndex: number;
@@ -578,6 +803,7 @@ export default function SchedulePage() {
   } | null>(null);
   const [timeStr, setTimeStr] = useState("09:00");
   const [modalCaption, setModalCaption] = useState("");
+  const [modalFirstComment, setModalFirstComment] = useState("");
   const [postIg, setPostIg] = useState(true);
   const [postFb, setPostFb] = useState(true);
   const [postYt, setPostYt] = useState(false);
@@ -593,6 +819,20 @@ export default function SchedulePage() {
   const [moveEntry, setMoveEntry] = useState<ScheduledCarouselPost | null>(null);
   const [moveTimeLocal, setMoveTimeLocal] = useState("");
   const [moveSaving, setMoveSaving] = useState(false);
+  const [dayPickTarget, setDayPickTarget] = useState<{
+    year: number;
+    monthIndex: number;
+    day: number;
+  } | null>(null);
+  const [detailEntry, setDetailEntry] = useState<ScheduledCarouselPost | null>(
+    null
+  );
+  const [detailCaption, setDetailCaption] = useState("");
+  const [detailFirstComment, setDetailFirstComment] = useState("");
+  const [detailPostIg, setDetailPostIg] = useState(true);
+  const [detailPostFb, setDetailPostFb] = useState(true);
+  const [detailPostYt, setDetailPostYt] = useState(false);
+  const [detailSaving, setDetailSaving] = useState(false);
 
   /** `undefined` = loading or daemon secret unset; else server snapshot by schedule id. */
   const [daemonStatusById, setDaemonStatusById] = useState<
@@ -643,6 +883,38 @@ export default function SchedulePage() {
     [queue]
   );
 
+  const hasSchedulableDoneQueue = useMemo(
+    () =>
+      externalVideos.length > 0 ||
+      doneQueue.some((q) =>
+        queueHasSchedulableOutput(queueSnapshots[q.id] ?? null, q)
+      ),
+    [doneQueue, externalVideos.length, queueSnapshots]
+  );
+
+  const addExternalVideos = useCallback((files: File[]) => {
+    const next = filterExternalCalendarVideos(files);
+    if (next.length === 0) return;
+    setScheduleUploadError(null);
+    setExternalVideos((prev) => [...prev, ...next]);
+  }, []);
+
+  const removeExternalVideo = useCallback((id: string) => {
+    setExternalVideos((prev) => prev.filter((v) => v.id !== id));
+  }, []);
+
+  const findExternalVideo = useCallback(
+    (id: string | undefined) =>
+      id ? (externalVideos.find((v) => v.id === id) ?? null) : null,
+    [externalVideos]
+  );
+
+  useEffect(() => {
+    if (!activeQueueId) return;
+    if (!doneQueue.some((q) => q.id === activeQueueId)) return;
+    flushActiveQueueSnapshot();
+  }, [activeQueueId, doneQueue, flushActiveQueueSnapshot]);
+
   const itemsByDay = useMemo(() => {
     const map = new Map<string, ScheduledCarouselPost[]>();
     for (const it of items) {
@@ -681,42 +953,171 @@ export default function SchedulePage() {
 
   const openTimeModal = useCallback(
     (
-      queueItemId: string,
-      videoLabel: string,
-      year: number,
-      monthIndex: number,
-      day: number,
-      scheduleKind: ScheduleContentKind
+      args: {
+        videoLabel: string;
+        year: number;
+        monthIndex: number;
+        day: number;
+        scheduleKind?: ScheduleContentKind;
+      } & (
+        | { queueItemId: string; externalVideoId?: undefined }
+        | {
+            externalVideoId: string;
+            /** Pass when the video was just added — state may not have flushed yet. */
+            externalVideo?: ExternalCalendarVideo;
+            queueItemId?: undefined;
+          }
+      )
     ) => {
-      const snap = resolveSnapshot(queueItemId);
-      setModalScheduleKind(scheduleKind);
-      if (scheduleKind === "photo" && snap) {
-        setModalCaption(captionFromImagePostSnapshot(snap));
-      } else if (scheduleKind === "short" && snap) {
-        const c = snap.socialCaption?.trim();
-        setModalCaption(
-          c && c.length > 0
-            ? c
-            : captionFromImagePostSnapshot(snap) || captionFromSnapshot(snap)
-        );
-      } else {
-        setModalCaption(snap ? captionFromSnapshot(snap) : "");
-      }
-      setTimeStr("09:00");
-      if (scheduleKind === "carousel" && snap) {
-        const anySlides =
-          pickSlidePreviewPngsForCalendar(snap, true, true).length > 0;
-        setPostIg(anySlides);
-        setPostFb(anySlides);
-      } else {
+      const { videoLabel, year, monthIndex, day, scheduleKind } = args;
+      if (args.externalVideoId) {
+        const ext =
+          findExternalVideo(args.externalVideoId) ?? args.externalVideo;
+        if (!ext) return;
+        if (!findExternalVideo(args.externalVideoId)) {
+          setExternalVideos((prev) =>
+            prev.some((v) => v.id === ext.id) ? prev : [...prev, ext]
+          );
+        }
+        setModalScheduleKind("short");
+        setTimeStr("09:00");
+        setModalFirstComment(getDefaultFirstCommentFromStorage().trim());
+        setModalCaption(displayHookFromExternalVideo(ext.file));
         setPostIg(true);
         setPostFb(true);
+        setPostYt(youtubeConfigured === true);
+        setDetailEntry(null);
+        setScheduleUploadError(null);
+        setPendingDrop({
+          externalVideoId: args.externalVideoId,
+          videoLabel,
+          year,
+          monthIndex,
+          day,
+        });
+        return;
       }
-      setPostYt(scheduleKind === "short" && youtubeConfigured === true);
+      const queueItemId = args.queueItemId;
+      if (!queueItemId) return;
+      const snap = resolveSnapshot(queueItemId);
+      const queueRow = queue.find((q) => q.id === queueItemId);
+      const kind =
+        scheduleKind ??
+        defaultScheduleKindForQueue(snap, queueRow ?? { shortOutputFile: null });
+      setModalScheduleKind(kind);
+      setTimeStr("09:00");
+      setModalFirstComment(getDefaultFirstCommentFromStorage().trim());
+      applyModalKindDefaults(
+        kind,
+        snap,
+        setModalCaption,
+        setPostIg,
+        setPostFb,
+        setPostYt,
+        youtubeConfigured === true
+      );
+      setDetailEntry(null);
+      setScheduleUploadError(null);
       setPendingDrop({ queueItemId, videoLabel, year, monthIndex, day });
     },
-    [resolveSnapshot, youtubeConfigured]
+    [findExternalVideo, resolveSnapshot, queue, youtubeConfigured]
   );
+
+  const openDetailModal = useCallback((entry: ScheduledCarouselPost) => {
+    setPendingDrop(null);
+    setDayPickTarget(null);
+    setMoveEntry(null);
+    setDetailEntry(entry);
+    setDetailCaption(entry.caption);
+    setDetailFirstComment(entry.firstComment ?? "");
+    setDetailPostIg(entry.postToInstagram);
+    setDetailPostFb(entry.postToFacebook);
+    setDetailPostYt(entry.postToYouTube === true);
+  }, []);
+
+  const confirmDetailUpdate = useCallback(() => {
+    if (!detailEntry || detailSaving) return;
+    if (isScheduleDaemonPublished(detailEntry, daemonStatusById)) return;
+    const kind = scheduleItemKind(detailEntry);
+    const hasDestination =
+      detailPostIg ||
+      detailPostFb ||
+      (kind === "short" && detailPostYt && youtubeConfigured === true);
+    if (!hasDestination) return;
+    setDetailSaving(true);
+    try {
+      updateScheduled(detailEntry.id, {
+        caption: detailCaption.trim(),
+        postToInstagram: detailPostIg,
+        postToFacebook: detailPostFb,
+        ...(kind === "short" ? { postToYouTube: detailPostYt } : {}),
+        ...(coerceFirstCommentField(detailFirstComment)
+          ? { firstComment: coerceFirstCommentField(detailFirstComment) }
+          : { firstComment: undefined }),
+      });
+      setDetailEntry(null);
+    } finally {
+      setDetailSaving(false);
+    }
+  }, [
+    detailCaption,
+    detailEntry,
+    detailFirstComment,
+    detailPostFb,
+    detailPostIg,
+    detailPostYt,
+    detailSaving,
+    daemonStatusById,
+    updateScheduled,
+    youtubeConfigured,
+  ]);
+
+  const pickVideoForDay = useCallback(
+    (q: VideoQueueItem) => {
+      if (!dayPickTarget) return;
+      const snap = resolveSnapshot(q.id);
+      if (!queueHasSchedulableOutput(snap, q)) return;
+      const { year, monthIndex, day } = dayPickTarget;
+      setDayPickTarget(null);
+      openTimeModal({
+        queueItemId: q.id,
+        videoLabel: queueItemScheduleLabel(q),
+        year,
+        monthIndex,
+        day,
+      });
+    },
+    [dayPickTarget, openTimeModal, resolveSnapshot]
+  );
+
+  const pickExternalVideoForDay = useCallback(
+    (video: ExternalCalendarVideo) => {
+      if (!dayPickTarget) return;
+      const { year, monthIndex, day } = dayPickTarget;
+      setDayPickTarget(null);
+      openTimeModal({
+        externalVideoId: video.id,
+        videoLabel: externalVideoLabel(video.file),
+        year,
+        monthIndex,
+        day,
+      });
+    },
+    [dayPickTarget, openTimeModal]
+  );
+
+  const dayPickDateLabel = dayPickTarget
+    ? new Date(
+        dayPickTarget.year,
+        dayPickTarget.monthIndex,
+        dayPickTarget.day
+      ).toLocaleDateString(undefined, {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      })
+    : "";
 
   useEffect(() => {
     if (!pendingDrop || modalScheduleKind !== "short") return;
@@ -726,11 +1127,68 @@ export default function SchedulePage() {
 
   const confirmSchedule = useCallback(async () => {
     if (!pendingDrop) return;
-    const snapPreflight = resolveSnapshot(pendingDrop.queueItemId);
+    setScheduleUploadError(null);
+
+    if (pendingDrop.externalVideoId) {
+      const ext = findExternalVideo(pendingDrop.externalVideoId);
+      if (!ext) return;
+      const hasDestination =
+        postIg ||
+        postFb ||
+        (postYt && youtubeConfigured === true);
+      if (!hasDestination) return;
+
+      setScheduleSaving(true);
+      try {
+        const when = combineLocalDateAndTime(
+          pendingDrop.year,
+          pendingDrop.monthIndex,
+          pendingDrop.day,
+          timeStr
+        );
+        const upload = await uploadExternalCalendarReel(ext);
+        if ("error" in upload) {
+          setScheduleUploadError(upload.error);
+          return;
+        }
+        setExternalVideos((prev) =>
+          prev.map((v) =>
+            v.id === ext.id ? { ...v, bunnyReelUrl: upload.bunnyReelUrl } : v
+          )
+        );
+        const displayHook = displayHookFromExternalVideo(ext.file);
+        addScheduled({
+          queueItemId: ext.id,
+          videoLabel: externalVideoLabel(ext.file),
+          publishAtUnix: Math.floor(when.getTime() / 1000),
+          caption: modalCaption.trim(),
+          postToInstagram: postIg,
+          postToFacebook: postFb,
+          postToYouTube: postYt,
+          slideCount: 1,
+          calendarThumbJpegs: undefined,
+          scheduleKind: "short",
+          displayHook,
+          bunnyUrls: { reelMp4Url: upload.bunnyReelUrl },
+          ...(coerceFirstCommentField(modalFirstComment)
+            ? { firstComment: coerceFirstCommentField(modalFirstComment) }
+            : {}),
+        });
+        setExternalVideos((prev) => prev.filter((v) => v.id !== ext.id));
+        setPendingDrop(null);
+      } finally {
+        setScheduleSaving(false);
+      }
+      return;
+    }
+
+    const queueItemId = pendingDrop.queueItemId;
+    if (!queueItemId) return;
+    const snapPreflight = resolveSnapshot(queueItemId);
     if (modalScheduleKind === "photo") {
-      if (!snapPreflight?.imagePost?.imageBase64) return;
+      if (!photoAssetReadyForSchedule(snapPreflight)) return;
     } else if (modalScheduleKind === "short") {
-      const qi = queue.find((q) => q.id === pendingDrop.queueItemId);
+      const qi = queue.find((q) => q.id === queueItemId);
       if (!qi?.shortOutputFile) return;
     } else if (
       !snapPreflight?.zipBase64 ||
@@ -746,13 +1204,22 @@ export default function SchedulePage() {
         pendingDrop.day,
         timeStr
       );
-      const snap = resolveSnapshot(pendingDrop.queueItemId);
+      const snap = resolveSnapshot(queueItemId);
       if (!snap) {
         if (modalScheduleKind !== "short") {
           return;
         }
-        const shortRow = addScheduled({
-          queueItemId: pendingDrop.queueItemId,
+        const shortQueueRow = queue.find((q) => q.id === queueItemId);
+        const shortDisplayHook = shortQueueRow?.displayLabel?.trim()
+          ? shortQueueRow.displayLabel.trim()
+          : displayHookForSchedule(
+              "short",
+              null,
+              pendingDrop.videoLabel
+            );
+        const bunnyFromQueue = queueSnapshots[queueItemId]?.bunnyUrls;
+        addScheduled({
+          queueItemId,
           videoLabel: pendingDrop.videoLabel,
           publishAtUnix: Math.floor(when.getTime() / 1000),
           caption: modalCaption.trim(),
@@ -762,21 +1229,16 @@ export default function SchedulePage() {
           slideCount: 1,
           calendarThumbJpegs: undefined,
           scheduleKind: "short",
-          displayHook: displayHookForSchedule(
-            "short",
-            null,
-            pendingDrop.videoLabel
-          ),
+          displayHook: shortDisplayHook,
+          ...(bunnyFromQueue ? { bunnyUrls: bunnyFromQueue } : {}),
+          ...(coerceFirstCommentField(modalFirstComment)
+            ? { firstComment: coerceFirstCommentField(modalFirstComment) }
+            : {}),
         });
-        const shortFileNoSnap = queue.find(
-          (q) => q.id === pendingDrop.queueItemId
-        )?.shortOutputFile;
-        if (shortFileNoSnap) {
-          void syncDaemonUpsertReel(
-            { ...shortRow, publishSlidesBase64: undefined },
-            shortFileNoSnap
-          );
-        }
+        // Phase 4.B: Hub is the sole sync target (via addScheduled above,
+        // which already fires upsertScheduledPostToHub including bunnyUrls).
+        // The legacy daemon-upsert-reel call to .data/daemon-reels/ is no
+        // longer needed — publish-due reads reelMp4Url from the Hub payload.
         setPendingDrop(null);
         return;
       }
@@ -807,13 +1269,16 @@ export default function SchedulePage() {
           calendarThumbJpegs = undefined;
         }
       }
-      const displayHook = displayHookForSchedule(
-        modalScheduleKind,
-        snap,
-        pendingDrop.videoLabel
-      );
-      const row = addScheduled({
-        queueItemId: pendingDrop.queueItemId,
+      const queueRow = queue.find((q) => q.id === queueItemId);
+      const displayHook = queueRow?.displayLabel?.trim()
+        ? queueRow.displayLabel.trim()
+        : displayHookForSchedule(
+            modalScheduleKind,
+            snap,
+            pendingDrop.videoLabel
+          );
+      addScheduled({
+        queueItemId,
         videoLabel: pendingDrop.videoLabel,
         publishAtUnix: Math.floor(when.getTime() / 1000),
         caption: modalCaption.trim(),
@@ -824,36 +1289,28 @@ export default function SchedulePage() {
         calendarThumbJpegs,
         scheduleKind: modalScheduleKind,
         displayHook,
+        // Phase 2.0: persist Bunny URLs (when present) onto the schedule row
+        // so the Hub `payload` + daemon-upsert both carry them and the
+        // publish path can skip Page-staging.
+        ...(snap.bunnyUrls ? { bunnyUrls: snap.bunnyUrls } : {}),
+        ...(coerceFirstCommentField(modalFirstComment)
+          ? { firstComment: coerceFirstCommentField(modalFirstComment) }
+          : {}),
       });
-      const slidesForDaemon =
-        modalScheduleKind === "photo"
-          ? imagePostSlideForMeta(snap)
-          : modalScheduleKind === "short"
-            ? []
-            : await slidesForMetaFromZipOrSnapshot(snap, postIg, postFb);
-      if (modalScheduleKind === "short") {
-        const shortFile = queue.find((q) => q.id === pendingDrop.queueItemId)
-          ?.shortOutputFile;
-        if (shortFile) {
-          void syncDaemonUpsertReel(
-            { ...row, publishSlidesBase64: undefined },
-            shortFile
-          );
-        }
-      } else if (slidesForDaemon.length > 0) {
-        const daemonEntry: DaemonScheduleEntry = {
-          ...row,
-          publishSlidesBase64: slidesForDaemon,
-        };
-        void syncDaemonUpsert(daemonEntry);
-      }
+      // Phase 4.B: dropped browser-side daemon-upsert + daemon-upsert-reel
+      // calls. addScheduled (above) already syncs the row to Hub including
+      // bunnyUrls via lib/schedule/hub-client.ts. publish-due reads from
+      // the Hub via /api/v1/internal/schedule/due — no .data/ writes needed
+      // on this client.
       setPendingDrop(null);
     } finally {
       setScheduleSaving(false);
     }
   }, [
     addScheduled,
+    findExternalVideo,
     modalCaption,
+    modalFirstComment,
     pendingDrop,
     modalScheduleKind,
     postFb,
@@ -862,41 +1319,25 @@ export default function SchedulePage() {
     resolveSnapshot,
     timeStr,
     queue,
+    queueSnapshots,
+    youtubeConfigured,
   ]);
 
+  /**
+   * Phase 4.B — `syncDaemonForEntry` is a no-op. Move/edit flows on the
+   * calendar still hit Hub via `moveScheduled` in `useScheduleStore` (which
+   * calls `upsertScheduledPostToHub` automatically). The legacy daemon
+   * writes to `.data/daemon-schedule.json` are no longer needed.
+   *
+   * Kept as a no-op (rather than deleted) so call sites in this file don't
+   * need to be touched in this commit; Phase 4.C removes both the
+   * placeholder and the call sites.
+   */
   const syncDaemonForEntry = useCallback(
-    async (entry: ScheduledCarouselPost) => {
-      const kind = scheduleItemKind(entry);
-      if (kind === "short") {
-        const shortFile = queue.find((q) => q.id === entry.queueItemId)
-          ?.shortOutputFile;
-        if (shortFile) {
-          await syncDaemonUpsertReel(
-            { ...entry, publishSlidesBase64: undefined },
-            shortFile
-          );
-        }
-        return;
-      }
-      const snap = resolveSnapshot(entry.queueItemId);
-      if (!snap) return;
-      const slides =
-        kind === "photo"
-          ? imagePostSlideForMeta(snap)
-          : await slidesForMetaFromZipOrSnapshot(
-              snap,
-              entry.postToInstagram,
-              entry.postToFacebook
-            );
-      if (slides.length > 0) {
-        const daemonEntry: DaemonScheduleEntry = {
-          ...entry,
-          publishSlidesBase64: slides,
-        };
-        await syncDaemonUpsert(daemonEntry);
-      }
+    async (_entry: ScheduledCarouselPost): Promise<void> => {
+      // intentionally empty — see comment above
     },
-    [queue, resolveSnapshot]
+    [],
   );
 
   const confirmMoveSchedule = useCallback(async () => {
@@ -931,7 +1372,11 @@ export default function SchedulePage() {
         const r = await runPublishEntryToMeta(
           entry,
           resolveSnapshot,
-          (id) => queue.find((q) => q.id === id)?.shortOutputFile
+          (id) => {
+            const qRow = queue.find((q) => q.id === id);
+            if (qRow?.shortOutputFile) return qRow.shortOutputFile;
+            return findExternalVideo(id)?.file ?? null;
+          }
         );
         if (!r.ok) {
           setPublishMessage(r.message);
@@ -941,8 +1386,12 @@ export default function SchedulePage() {
         if (r.instagramMediaId) parts.push(`Instagram ${r.instagramMediaId}`);
         if (r.facebookPostId) parts.push(`Facebook ${r.facebookPostId}`);
         if (r.youtubeVideoId) parts.push(`YouTube ${r.youtubeVideoId}`);
+        const commentNote = firstCommentPublishNote(r);
+        const base = parts.length
+          ? `Scheduled with Meta: ${parts.join(" · ")}`
+          : "Sent to Meta.";
         setPublishMessage(
-          parts.length ? `Scheduled with Meta: ${parts.join(" · ")}` : "Sent to Meta."
+          commentNote ? `${base} ${commentNote}` : base
         );
       } catch (e) {
         setPublishMessage(e instanceof Error ? e.message : "Network error.");
@@ -950,7 +1399,7 @@ export default function SchedulePage() {
         setPublishBusyId(null);
       }
     },
-    [resolveSnapshot, queue]
+    [resolveSnapshot, queue, findExternalVideo]
   );
 
   const cells = useMemo(() => calendarCells(viewMonth), [viewMonth]);
@@ -959,13 +1408,14 @@ export default function SchedulePage() {
     year: "numeric",
   });
 
-  const modalSnapPeek = pendingDrop
+  const modalSnapPeek = pendingDrop?.queueItemId
     ? peekQueueSnapshot(pendingDrop.queueItemId)
     : null;
-  const modalPhotoAvailable = !!(
-    modalSnapPeek?.imagePost?.imageBase64 &&
-    modalSnapPeek.imagePost.imageBase64.length > 0
-  );
+  const pendingExternalVideo = pendingDrop?.externalVideoId
+    ? findExternalVideo(pendingDrop.externalVideoId)
+    : null;
+  const isExternalScheduleModal = Boolean(pendingDrop?.externalVideoId);
+  const modalPhotoAvailable = photoAssetReadyForSchedule(modalSnapPeek);
   const modalCarouselReady =
     !!modalSnapPeek?.zipBase64 &&
     pickSlidePreviewPngsForCalendar(
@@ -973,198 +1423,83 @@ export default function SchedulePage() {
       postIg,
       postFb
     ).length > 0;
-  const modalShortAvailable = Boolean(
-    pendingDrop &&
-      queue.find((q) => q.id === pendingDrop.queueItemId)?.shortOutputFile
-  );
+  const modalShortAvailable = isExternalScheduleModal
+    ? Boolean(pendingExternalVideo)
+    : Boolean(
+        pendingDrop &&
+          queue.find((q) => q.id === pendingDrop.queueItemId)?.shortOutputFile
+      );
   const canConfirmSchedule =
     !!pendingDrop &&
     (postIg ||
       postFb ||
       (modalScheduleKind === "short" && postYt && youtubeConfigured === true)) &&
     !scheduleSaving &&
-    (modalScheduleKind !== "photo" || modalPhotoAvailable) &&
-    (modalScheduleKind !== "carousel" || modalCarouselReady) &&
-    (modalScheduleKind !== "short" || modalShortAvailable);
+    (isExternalScheduleModal
+      ? Boolean(pendingExternalVideo)
+      : (modalScheduleKind !== "photo" || modalPhotoAvailable) &&
+        (modalScheduleKind !== "carousel" || modalCarouselReady) &&
+        (modalScheduleKind !== "short" || modalShortAvailable));
 
   const timeModalKindPill = scheduleKindPillModal(modalScheduleKind);
+
+  const detailKind = detailEntry ? scheduleItemKind(detailEntry) : "carousel";
+  const detailKindPill = scheduleKindPillModal(detailKind);
+  const detailPublished = detailEntry
+    ? isScheduleDaemonPublished(detailEntry, daemonStatusById)
+    : false;
+  const canSaveDetail =
+    !!detailEntry &&
+    !detailSaving &&
+    !detailPublished &&
+    (detailPostIg ||
+      detailPostFb ||
+      (detailKind === "short" && detailPostYt && youtubeConfigured === true));
 
   return (
     <main className="mx-auto min-h-screen max-w-6xl px-4 py-10">
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <ContentMultiplierHomeLink className="inline-flex items-center gap-2 text-sm font-medium text-palette-depth hover:text-stone-900" />
-          </div>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-stone-900">
+          <h1 className="text-2xl font-semibold tracking-tight text-stone-900">
             Schedule posts
           </h1>
         </div>
       </div>
 
       <div className="grid gap-8 lg:grid-cols-[minmax(200px,280px)_1fr]">
-        <section className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
+        <div className="space-y-4">
+          <ExternalCalendarVideosPanel
+            videos={externalVideos}
+            uploadInputId={externalUploadInputId}
+            onFilesSelected={addExternalVideos}
+            onRemove={removeExternalVideo}
+          />
+          <section className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500">
             Ready to schedule
           </h2>
           <p className="mt-1 text-xs text-stone-500">
-            Only videos marked Done. Up to three rows: carousel, 4:5 photo, and
-            Video to Short reel (when generated).
+            Drag a video onto a day, or click + on a day, then pick carousel,
+            photo, or short in the dialog.
           </p>
-          <ul className="mt-4 space-y-4">
+          <ul className="mt-4 space-y-3">
             {doneQueue.length === 0 ? (
               <li className="text-sm text-stone-600">No completed videos yet.</li>
             ) : (
-              doneQueue.map((q) => {
-                const snap = queueSnapshots[q.id] ?? null;
-                const carThumb = snap?.firstSlidePreviewBase64 ?? null;
-                const phB64 = snap?.imagePost?.imageBase64;
-                const photoReady = typeof phB64 === "string" && phB64.length > 0;
-                const carTitle = displayHookForSchedule(
-                  "carousel",
-                  snap,
-                  q.file.name
-                );
-                const phTitle = displayHookForSchedule("photo", snap, q.file.name);
-                const shortReady = Boolean(q.shortOutputFile);
-                const shortTitle = displayHookForSchedule(
-                  "short",
-                  snap,
-                  q.file.name
-                );
-                return (
-                  <li key={q.id} className="space-y-2">
-                    <div
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData(
-                          DRAG_MIME,
-                          JSON.stringify({
-                            queueItemId: q.id,
-                            scheduleKind: "carousel",
-                          })
-                        );
-                        e.dataTransfer.setData("text/plain", q.file.name);
-                        e.dataTransfer.effectAllowed = "copy";
-                      }}
-                      className="flex cursor-grab items-center gap-3 rounded-xl border border-stone-200 bg-stone-50/80 p-2 active:cursor-grabbing"
-                    >
-                      {carThumb ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={`data:image/png;base64,${carThumb}`}
-                          alt=""
-                          className="h-12 w-12 shrink-0 rounded-lg border border-stone-200 object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-stone-200 text-xs text-stone-500">
-                          …
-                        </div>
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-stone-800">
-                          {carTitle}
-                        </p>
-                        <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-palette-depth">
-                          Carousel
-                        </p>
-                      </div>
-                    </div>
-                    <div
-                      draggable={photoReady}
-                      onDragStart={(e) => {
-                        if (!photoReady) {
-                          e.preventDefault();
-                          return;
-                        }
-                        e.dataTransfer.setData(
-                          DRAG_MIME,
-                          JSON.stringify({
-                            queueItemId: q.id,
-                            scheduleKind: "photo",
-                          })
-                        );
-                        e.dataTransfer.setData("text/plain", q.file.name);
-                        e.dataTransfer.effectAllowed = "copy";
-                      }}
-                      className={`flex items-center gap-3 rounded-xl border border-dashed border-stone-200 bg-white/80 p-2 ${
-                        photoReady
-                          ? "cursor-grab active:cursor-grabbing"
-                          : "cursor-not-allowed opacity-60"
-                      }`}
-                    >
-                      {photoReady ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={`data:image/png;base64,${phB64}`}
-                          alt=""
-                          className="h-12 w-12 shrink-0 rounded-lg border border-stone-200 object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-stone-100 text-[10px] text-stone-500">
-                          —
-                        </div>
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-stone-800">
-                          {phTitle}
-                        </p>
-                        <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-800">
-                          Photo
-                        </p>
-                        {!photoReady && (
-                          <p className="mt-0.5 text-[10px] text-stone-500">
-                            Open on home to generate
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <div
-                      draggable={shortReady}
-                      onDragStart={(e) => {
-                        if (!shortReady) {
-                          e.preventDefault();
-                          return;
-                        }
-                        e.dataTransfer.setData(
-                          DRAG_MIME,
-                          JSON.stringify({
-                            queueItemId: q.id,
-                            scheduleKind: "short",
-                          })
-                        );
-                        e.dataTransfer.setData("text/plain", q.file.name);
-                        e.dataTransfer.effectAllowed = "copy";
-                      }}
-                      className={`flex items-center gap-3 rounded-xl border border-dashed border-stone-200 bg-white/80 p-2 ${
-                        shortReady
-                          ? "cursor-grab active:cursor-grabbing"
-                          : "cursor-not-allowed opacity-60"
-                      }`}
-                    >
-                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-[10px] font-semibold text-white">
-                        ▶
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-stone-800">
-                          {shortTitle}
-                        </p>
-                        <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800">
-                          Short
-                        </p>
-                        {!shortReady && (
-                          <p className="mt-0.5 text-[10px] text-stone-500">
-                            Generate short on home first
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </li>
-                );
-              })
+              doneQueue.map((q) => (
+                <li key={q.id}>
+                  <ReadyToScheduleVideoRow
+                    q={q}
+                    snap={queueSnapshots[q.id] ?? null}
+                    mode="drag"
+                    resolveSnapshot={resolveSnapshot}
+                  />
+                </li>
+              ))
             )}
           </ul>
         </section>
+        </div>
 
         <section className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
           <div className="mb-4 flex items-center justify-between gap-2">
@@ -1225,24 +1560,89 @@ export default function SchedulePage() {
                   }}
                   onDrop={(e) => {
                     e.preventDefault();
+                    setDayPickTarget(null);
+
                     const raw = e.dataTransfer.getData(DRAG_MIME);
-                    const parsed = parseScheduleDrag(raw);
-                    if (!parsed) return;
-                    const label =
-                      e.dataTransfer.getData("text/plain") ||
-                      queue.find((q) => q.id === parsed.queueItemId)?.file.name ||
-                      "Video";
-                    openTimeModal(
-                      parsed.queueItemId,
-                      label,
-                      viewMonth.getFullYear(),
-                      viewMonth.getMonth(),
-                      day,
-                      parsed.scheduleKind
-                    );
+                    const parsed = parseScheduleDragPayload(raw);
+                    if (parsed) {
+                      if ("externalVideoId" in parsed) {
+                        const ext = findExternalVideo(parsed.externalVideoId);
+                        if (!ext) return;
+                        openTimeModal({
+                          externalVideoId: parsed.externalVideoId,
+                          videoLabel: externalVideoLabel(ext.file),
+                          year: viewMonth.getFullYear(),
+                          monthIndex: viewMonth.getMonth(),
+                          day,
+                          scheduleKind: "short",
+                        });
+                        return;
+                      }
+                      const dragged = queue.find(
+                        (q) => q.id === parsed.queueItemId
+                      );
+                      const label =
+                        e.dataTransfer.getData("text/plain") ||
+                        (dragged ? queueItemScheduleLabel(dragged) : "Video");
+                      openTimeModal({
+                        queueItemId: parsed.queueItemId,
+                        videoLabel: label,
+                        year: viewMonth.getFullYear(),
+                        monthIndex: viewMonth.getMonth(),
+                        day,
+                        scheduleKind: parsed.scheduleKind,
+                      });
+                      return;
+                    }
+
+                    const droppedFiles = Array.from(e.dataTransfer.files ?? []);
+                    const videoFiles = filterExternalCalendarVideos(droppedFiles);
+                    if (videoFiles.length > 0) {
+                      const video = videoFiles[0]!;
+                      openTimeModal({
+                        externalVideoId: video.id,
+                        externalVideo: video,
+                        videoLabel: externalVideoLabel(video.file),
+                        year: viewMonth.getFullYear(),
+                        monthIndex: viewMonth.getMonth(),
+                        day,
+                      });
+                    }
                   }}
                 >
-                  <span className="text-xs font-semibold text-stone-700">{day}</span>
+                  <div className="flex items-center justify-between gap-0.5">
+                    <span className="text-xs font-semibold text-stone-700">
+                      {day}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={!hasSchedulableDoneQueue}
+                      aria-label={
+                        !hasSchedulableDoneQueue
+                          ? `No schedulable videos for day ${day}`
+                          : `Add a scheduled post on ${day}`
+                      }
+                      title={
+                        !hasSchedulableDoneQueue
+                          ? doneQueue.length === 0 && externalVideos.length === 0
+                            ? "Upload a video or finish processing on Multiplier first"
+                            : "Generate carousel, photo, or short on Multiplier first"
+                          : "Schedule a post"
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDetailEntry(null);
+                        setDayPickTarget({
+                          year: viewMonth.getFullYear(),
+                          monthIndex: viewMonth.getMonth(),
+                          day,
+                        });
+                      }}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-stone-200/90 bg-white text-sm font-semibold leading-none text-stone-600 transition hover:border-palette-teal/50 hover:bg-palette-pale/30 hover:text-palette-depth disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      +
+                    </button>
+                  </div>
                   <ul className="mt-1 flex flex-1 flex-col gap-1 overflow-hidden">
                     {dayItems.map((it) => {
                       const { srcs, moreCount } = scheduleItemThumbDisplay(
@@ -1256,63 +1656,70 @@ export default function SchedulePage() {
                         <li
                           key={it.id}
                           className="rounded bg-palette-moss/15 px-1 py-1 text-[10px] font-medium text-stone-800"
-                          title={`${schedulePrimaryTitle(it)} · ${it.videoLabel}`}
                         >
-                          {srcs.length > 0 && (
-                            <div className="mb-0.5 flex items-center gap-0.5 overflow-x-auto">
-                              {srcs.map((src, i) => (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  key={i}
-                                  src={src}
-                                  alt=""
-                                  className="h-7 w-7 shrink-0 rounded border border-stone-200/80 object-cover"
-                                />
-                              ))}
-                              {moreCount > 0 && (
-                                <span className="shrink-0 rounded border border-stone-300/80 bg-white/90 px-1 py-0.5 text-[9px] font-semibold text-stone-600">
-                                  +{moreCount}
-                                </span>
-                              )}
+                          <button
+                            type="button"
+                            onClick={() => openDetailModal(it)}
+                            className="w-full rounded text-left transition hover:opacity-90"
+                            title={`${schedulePrimaryTitle(it)} · ${it.videoLabel} — click for caption & platforms`}
+                          >
+                            {srcs.length > 0 && (
+                              <div className="mb-0.5 flex items-center gap-0.5 overflow-x-auto">
+                                {srcs.map((src, i) => (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    key={i}
+                                    src={src}
+                                    alt=""
+                                    className="h-7 w-7 shrink-0 rounded border border-stone-200/80 object-cover"
+                                  />
+                                ))}
+                                {moreCount > 0 && (
+                                  <span className="shrink-0 rounded border border-stone-300/80 bg-white/90 px-1 py-0.5 text-[9px] font-semibold text-stone-600">
+                                    +{moreCount}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            <div className="flex min-w-0 flex-col items-start gap-0.5">
+                              <span className={dayKindPill.className}>
+                                {dayKindPill.label}
+                              </span>
+                              <p className="w-full min-w-0 truncate leading-tight">
+                                {schedulePrimaryTitle(it)}
+                              </p>
                             </div>
-                          )}
-                          <div className="flex min-w-0 flex-col items-start gap-0.5">
-                            <span className={dayKindPill.className}>
-                              {dayKindPill.label}
-                            </span>
-                            <p className="w-full min-w-0 truncate leading-tight">
-                              {schedulePrimaryTitle(it)}
-                            </p>
-                            <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                              <DaemonPublishStatusSpan
-                                entry={it}
-                                byId={daemonStatusById}
-                                variant="cell"
-                              />
-                              <button
-                                type="button"
-                                disabled={
-                                  publishLocked ||
-                                  isScheduleDaemonPublished(it, daemonStatusById)
-                                }
-                                title={
-                                  isScheduleDaemonPublished(it, daemonStatusById)
-                                    ? "Already auto-published"
-                                    : "Move to another time"
-                                }
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPendingDrop(null);
-                                  setMoveEntry(it);
-                                  setMoveTimeLocal(
-                                    toDatetimeLocalValue(it.publishAtUnix)
-                                  );
-                                }}
-                                className="rounded border border-stone-300/80 bg-white/90 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
-                              >
-                                Move
-                              </button>
-                            </div>
+                          </button>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                            <DaemonPublishStatusSpan
+                              entry={it}
+                              byId={daemonStatusById}
+                              variant="cell"
+                            />
+                            <button
+                              type="button"
+                              disabled={
+                                publishLocked ||
+                                isScheduleDaemonPublished(it, daemonStatusById)
+                              }
+                              title={
+                                isScheduleDaemonPublished(it, daemonStatusById)
+                                  ? "Already auto-published"
+                                  : "Move to another time"
+                              }
+                              onClick={() => {
+                                setPendingDrop(null);
+                                setDayPickTarget(null);
+                                setDetailEntry(null);
+                                setMoveEntry(it);
+                                setMoveTimeLocal(
+                                  toDatetimeLocalValue(it.publishAtUnix)
+                                );
+                              }}
+                              className="rounded border border-stone-300/80 bg-white/90 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              Move
+                            </button>
                           </div>
                         </li>
                       );
@@ -1419,7 +1826,7 @@ export default function SchedulePage() {
                       onClick={() => publishToMeta(it)}
                       className="rounded-lg bg-palette-moss px-3 py-2 text-xs font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
                     >
-                      {publishBusyId === it.id ? "Sending…" : "Send to Meta"}
+                      {publishBusyId === it.id ? "Sending…" : "Publish Now"}
                     </button>
                     <button
                       type="button"
@@ -1434,6 +1841,8 @@ export default function SchedulePage() {
                       }
                       onClick={() => {
                         setPendingDrop(null);
+                        setDayPickTarget(null);
+                        setDetailEntry(null);
                         setMoveEntry(it);
                         setMoveTimeLocal(toDatetimeLocalValue(it.publishAtUnix));
                       }}
@@ -1456,9 +1865,88 @@ export default function SchedulePage() {
         )}
       </section>
 
-      {pendingDrop && (
+      {dayPickTarget && !pendingDrop && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="day-pick-dialog-title"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-stone-900/40 backdrop-blur-[2px]"
+            aria-label="Close"
+            onClick={() => setDayPickTarget(null)}
+          />
+          <div className="relative z-10 flex max-h-[min(90vh,560px)] w-full max-w-sm flex-col rounded-2xl border border-stone-200 bg-white shadow-xl">
+            <div className="shrink-0 border-b border-stone-100 px-5 py-4">
+              <h2
+                id="day-pick-dialog-title"
+                className="text-lg font-semibold text-stone-900"
+              >
+                Schedule for {dayPickDateLabel}
+              </h2>
+              <p className="mt-1 text-sm text-stone-600">
+                Choose a video from Ready to schedule, or an uploaded file.
+              </p>
+            </div>
+            <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto px-5 py-4">
+              {externalVideos.length > 0 ? (
+                <>
+                  <li className="text-[10px] font-semibold uppercase tracking-wide text-violet-800/70">
+                    Uploaded videos
+                  </li>
+                  {externalVideos.map((video) => (
+                    <li key={video.id}>
+                      <ExternalVideoPickRow
+                        video={video}
+                        onPick={() => pickExternalVideoForDay(video)}
+                      />
+                    </li>
+                  ))}
+                </>
+              ) : null}
+              {doneQueue.length === 0 && externalVideos.length === 0 ? (
+                <li className="text-sm text-stone-600">
+                  Upload a video above, or finish processing on Multiplier first.
+                </li>
+              ) : doneQueue.length === 0 ? null : (
+                <>
+                  {externalVideos.length > 0 ? (
+                    <li className="pt-2 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                      From Multiplier
+                    </li>
+                  ) : null}
+                  {doneQueue.map((q) => (
+                  <li key={q.id}>
+                    <ReadyToScheduleVideoRow
+                      q={q}
+                      snap={queueSnapshots[q.id] ?? null}
+                      mode="pick"
+                      resolveSnapshot={resolveSnapshot}
+                      onPick={() => pickVideoForDay(q)}
+                    />
+                  </li>
+                  ))}
+                </>
+              )}
+            </ul>
+            <div className="shrink-0 border-t border-stone-100 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setDayPickTarget(null)}
+                className="w-full rounded-lg border border-stone-200 px-3 py-2 text-sm font-medium text-stone-700 hover:bg-stone-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingDrop && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="time-dialog-title"
@@ -1475,11 +1963,24 @@ export default function SchedulePage() {
             </h2>
             <p className="mt-1 text-sm text-stone-600">
               <span className="font-medium text-stone-800">
-                {displayHookForSchedule(
-                  modalScheduleKind,
-                  modalSnapPeek,
-                  pendingDrop.videoLabel
-                )}
+                {isExternalScheduleModal && pendingExternalVideo
+                  ? displayHookFromExternalVideo(pendingExternalVideo.file)
+                  : (() => {
+                      const row = queue.find(
+                        (q) => q.id === pendingDrop.queueItemId
+                      );
+                      return row
+                        ? scheduleTitleForQueueItem(
+                            modalScheduleKind,
+                            modalSnapPeek,
+                            row
+                          )
+                        : displayHookForSchedule(
+                            modalScheduleKind,
+                            modalSnapPeek,
+                            pendingDrop.videoLabel
+                          );
+                    })()}
               </span>
               <span className={timeModalKindPill.className}>
                 {timeModalKindPill.label}
@@ -1487,6 +1988,12 @@ export default function SchedulePage() {
               <span className="mt-1 block text-stone-500">
                 File: {pendingDrop.videoLabel}
               </span>
+              {isExternalScheduleModal ? (
+                <span className="mt-0.5 block text-xs text-violet-800/80">
+                  Uploads to storage when you save — auto-publish works after
+                  that.
+                </span>
+              ) : null}
               <span className="mt-0.5 block">
                 {new Date(
                   pendingDrop.year,
@@ -1500,25 +2007,24 @@ export default function SchedulePage() {
                 })}
               </span>
             </p>
+            {!isExternalScheduleModal ? (
             <div className="mt-4">
               <p className="text-sm font-medium text-stone-800">Post type</p>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   type="button"
                   onClick={() => {
+                    if (!pendingDrop.queueItemId) return;
                     setModalScheduleKind("carousel");
-                    const s = resolveSnapshot(pendingDrop.queueItemId);
-                    if (s) {
-                      setModalCaption(captionFromSnapshot(s));
-                      const any =
-                        pickSlidePreviewPngsForCalendar(s, true, true).length > 0;
-                      setPostIg(any);
-                      setPostFb(any);
-                    } else {
-                      setPostIg(true);
-                      setPostFb(true);
-                    }
-                    setPostYt(false);
+                    applyModalKindDefaults(
+                      "carousel",
+                      resolveSnapshot(pendingDrop.queueItemId),
+                      setModalCaption,
+                      setPostIg,
+                      setPostFb,
+                      setPostYt,
+                      false
+                    );
                   }}
                   className={`rounded-lg border px-3 py-2 text-xs font-semibold transition ${
                     modalScheduleKind === "carousel"
@@ -1537,13 +2043,17 @@ export default function SchedulePage() {
                       : "Generate the image post on the home page first"
                   }
                   onClick={() => {
-                    if (!modalPhotoAvailable) return;
+                    if (!modalPhotoAvailable || !pendingDrop.queueItemId) return;
                     setModalScheduleKind("photo");
-                    const s = resolveSnapshot(pendingDrop.queueItemId);
-                    if (s) setModalCaption(captionFromImagePostSnapshot(s));
-                    setPostIg(true);
-                    setPostFb(true);
-                    setPostYt(false);
+                    applyModalKindDefaults(
+                      "photo",
+                      resolveSnapshot(pendingDrop.queueItemId),
+                      setModalCaption,
+                      setPostIg,
+                      setPostFb,
+                      setPostYt,
+                      false
+                    );
                   }}
                   className={`rounded-lg border px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
                     modalScheduleKind === "photo"
@@ -1562,21 +2072,17 @@ export default function SchedulePage() {
                       : "Generate the short on the home page first"
                   }
                   onClick={() => {
-                    if (!modalShortAvailable || !pendingDrop) return;
+                    if (!modalShortAvailable || !pendingDrop?.queueItemId) return;
                     setModalScheduleKind("short");
-                    const s = resolveSnapshot(pendingDrop.queueItemId);
-                    if (s) {
-                      const c = s.socialCaption?.trim();
-                      setModalCaption(
-                        c && c.length > 0
-                          ? c
-                          : captionFromImagePostSnapshot(s) ||
-                            captionFromSnapshot(s)
-                      );
-                    }
-                    setPostIg(true);
-                    setPostFb(true);
-                    setPostYt(youtubeConfigured === true);
+                    applyModalKindDefaults(
+                      "short",
+                      resolveSnapshot(pendingDrop.queueItemId),
+                      setModalCaption,
+                      setPostIg,
+                      setPostFb,
+                      setPostYt,
+                      youtubeConfigured === true
+                    );
                   }}
                   className={`rounded-lg border px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
                     modalScheduleKind === "short"
@@ -1588,6 +2094,7 @@ export default function SchedulePage() {
                 </button>
               </div>
             </div>
+            ) : null}
             <label className="mt-4 block text-sm font-medium text-stone-800">
               Time
               <input
@@ -1605,6 +2112,29 @@ export default function SchedulePage() {
                 rows={4}
                 className="mt-1.5 w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm"
               />
+            </label>
+            <label className="mt-4 block text-sm font-medium text-stone-800">
+              First comment{" "}
+              <span className="font-normal text-stone-500">(optional)</span>
+              <textarea
+                value={modalFirstComment}
+                onChange={(e) =>
+                  setModalFirstComment(
+                    e.target.value.slice(0, MAX_DEFAULT_FIRST_COMMENT_CHARS)
+                  )
+                }
+                rows={2}
+                placeholder="Link, CTA, or extra context…"
+                className="mt-1.5 w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm"
+              />
+              <span className="mt-1 block text-xs font-normal text-stone-400">
+                {modalFirstComment.length.toLocaleString()} /{" "}
+                {MAX_DEFAULT_FIRST_COMMENT_CHARS.toLocaleString()}
+              </span>
+              <span className="mt-1 block text-xs font-normal text-stone-500">
+                Posted automatically after publish. Pin it in Instagram or Facebook
+                if you want it at the top — the API cannot pin for you.
+              </span>
             </label>
             <fieldset className="mt-4 space-y-2">
               <legend className="text-sm font-medium text-stone-800">Destinations</legend>
@@ -1659,6 +2189,9 @@ export default function SchedulePage() {
                   </p>
                 )}
             </fieldset>
+            {scheduleUploadError ? (
+              <p className="mt-3 text-sm text-red-700">{scheduleUploadError}</p>
+            ) : null}
             <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
@@ -1673,8 +2206,159 @@ export default function SchedulePage() {
                 disabled={!canConfirmSchedule}
                 className="rounded-xl bg-palette-moss px-4 py-2 text-sm font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
               >
-                {scheduleSaving ? "Saving…" : "Add to schedule"}
+                {scheduleSaving
+                  ? isExternalScheduleModal
+                    ? "Uploading…"
+                    : "Saving…"
+                  : "Add to schedule"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {detailEntry && (
+        <div
+          className="fixed inset-0 z-[55] flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="detail-dialog-title"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-stone-900/40 backdrop-blur-[2px]"
+            aria-label="Close"
+            onClick={() => !detailSaving && setDetailEntry(null)}
+          />
+          <div className="relative z-10 max-h-[min(90vh,640px)] w-full max-w-md overflow-y-auto rounded-2xl border border-stone-200 bg-white p-6 shadow-xl">
+            <h2
+              id="detail-dialog-title"
+              className="text-lg font-semibold text-stone-900"
+            >
+              Scheduled post
+            </h2>
+            <p className="mt-1 text-sm text-stone-600">
+              <span className="font-medium text-stone-800">
+                {schedulePrimaryTitle(detailEntry)}
+              </span>
+              <span className={detailKindPill.className}>
+                {detailKindPill.label}
+              </span>
+              <span className="mt-1 block text-stone-500">
+                File: {detailEntry.videoLabel}
+              </span>
+              <span className="mt-0.5 block">
+                {new Date(detailEntry.publishAtUnix * 1000).toLocaleString(
+                  undefined,
+                  {
+                    weekday: "long",
+                    month: "long",
+                    day: "numeric",
+                    year: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  }
+                )}
+              </span>
+            </p>
+            {detailPublished && (
+              <p className="mt-3 text-sm text-amber-800">
+                This post was already published — caption and destinations are
+                read-only here.
+              </p>
+            )}
+            <label className="mt-4 block text-sm font-medium text-stone-800">
+              Caption
+              <textarea
+                value={detailCaption}
+                onChange={(e) => setDetailCaption(e.target.value)}
+                readOnly={detailPublished}
+                rows={4}
+                className="mt-1.5 w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm read-only:bg-stone-50"
+              />
+            </label>
+            <label className="mt-4 block text-sm font-medium text-stone-800">
+              First comment{" "}
+              <span className="font-normal text-stone-500">(optional)</span>
+              <textarea
+                value={detailFirstComment}
+                onChange={(e) =>
+                  setDetailFirstComment(
+                    e.target.value.slice(0, MAX_DEFAULT_FIRST_COMMENT_CHARS)
+                  )
+                }
+                readOnly={detailPublished}
+                rows={2}
+                placeholder="Link, CTA, or extra context…"
+                className="mt-1.5 w-full resize-y rounded-lg border border-stone-200 px-3 py-2 text-sm read-only:bg-stone-50"
+              />
+            </label>
+            <fieldset className="mt-4 space-y-2" disabled={detailPublished}>
+              <legend className="text-sm font-medium text-stone-800">
+                Destinations
+              </legend>
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="checkbox"
+                  checked={detailPostIg}
+                  onChange={(e) => setDetailPostIg(e.target.checked)}
+                  className="rounded border-stone-300 text-palette-moss"
+                />
+                Instagram
+              </label>
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input
+                  type="checkbox"
+                  checked={detailPostFb}
+                  onChange={(e) => setDetailPostFb(e.target.checked)}
+                  className="rounded border-stone-300 text-palette-moss"
+                />
+                Facebook Page
+              </label>
+              <label
+                className={`flex items-center gap-2 text-sm ${
+                  detailKind === "short"
+                    ? "text-stone-700"
+                    : "cursor-not-allowed text-stone-400"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  disabled={detailKind !== "short"}
+                  checked={detailKind === "short" && detailPostYt}
+                  onChange={(e) => setDetailPostYt(e.target.checked)}
+                  className="rounded border-stone-300 text-palette-moss disabled:opacity-50"
+                />
+                YouTube (Short)
+              </label>
+              {detailKind === "short" &&
+                detailPostYt &&
+                youtubeConfigured === false && (
+                  <p className="text-xs text-amber-800">
+                    YouTube is not connected — this destination will not publish
+                    until configured.
+                  </p>
+                )}
+            </fieldset>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={detailSaving}
+                onClick={() => setDetailEntry(null)}
+                className="rounded-xl border border-stone-200 px-4 py-2 text-sm font-medium text-stone-800 hover:bg-stone-50 disabled:opacity-50"
+              >
+                {detailPublished ? "Close" : "Cancel"}
+              </button>
+              {!detailPublished && (
+                <button
+                  type="button"
+                  onClick={() => confirmDetailUpdate()}
+                  disabled={!canSaveDetail}
+                  className="rounded-xl bg-palette-moss px-4 py-2 text-sm font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
+                >
+                  {detailSaving ? "Saving…" : "Save"}
+                </button>
+              )}
             </div>
           </div>
         </div>

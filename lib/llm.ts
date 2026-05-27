@@ -1,5 +1,10 @@
 import OpenAI from "openai";
-import { FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS } from "./carousel-slide-limits";
+import {
+  FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS,
+  firstCarouselSlideIndex,
+  splitFirstSlideHeadlineAtMax,
+} from "./carousel-slide-limits";
+import { FIRST_SLIDE_HOOK_COPY_APPENDIX } from "./first-slide-hook-copy";
 import type {
   CarouselRecommendation,
   CarouselType,
@@ -76,6 +81,8 @@ Headline / body split:
 - That **one** slide's \`headline\` MUST be **${FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS} characters or fewer** (count spaces and punctuation). **No other slide** has this limit—slides 2+ can use normal longer headlines (still keep them tight and readable).
 - **Craft** this first hook to read naturally at that length. Do **not** write a long first headline expecting truncation—move overflow to \`body\` on that same slide.
 - If you would otherwise exceed the cap, shorten the first slide's headline and put the rest in \`body\`.
+
+${FIRST_SLIDE_HOOK_COPY_APPENDIX}
 
 Transcript fidelity:
 - Write only what is supported by the transcript.
@@ -250,7 +257,7 @@ export async function generateSlides(
     vf
       ? `\n${vf}\n`
       : "",
-    `\nHard export rule (first slide only): the single opening slide (minimum \`order\`, usually 1) must have \`headline\` ≤${FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS} chars for the first image overlay. All other slides: no 25-char headline limit.\n`,
+    `\nHard export rule (first slide only): the single opening slide (minimum \`order\`, usually 1) must have \`headline\` ≤${FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS} chars for the first image overlay (complete words only). All other slides: no ${FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS}-char headline limit.\n`,
     "\nTranscript segments (use segment indices in evidenceSegmentIds):\n",
     transcriptText(segments),
   ].join("");
@@ -300,21 +307,18 @@ export async function generateSlides(
  */
 function enforceFirstSlideHeadlineMaxChars(slides: SlidePlan[]): SlidePlan[] {
   if (slides.length === 0) return slides;
-  const firstIndex = slides
-    .map((s, i) => ({
-      i,
-      order:
-        typeof s.order === "number" && Number.isFinite(s.order) ? s.order : Infinity,
-    }))
-    .sort((a, b) => a.order - b.order || a.i - b.i)[0]!.i;
+  const firstIndex = firstCarouselSlideIndex(slides);
 
   return slides.map((s, i) => {
     if (i !== firstIndex) return s;
     const h = s.headline.trim();
-    if (h.length <= FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS) return s;
+    const { headline, overflow } = splitFirstSlideHeadlineAtMax(h);
+    if (!overflow) return { ...s, headline };
+    const bodyParts = [overflow, s.body?.trim()].filter(Boolean);
     return {
       ...s,
-      headline: h.slice(0, FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS).trimEnd(),
+      headline,
+      body: bodyParts.length > 0 ? bodyParts.join(" ") : undefined,
     };
   });
 }

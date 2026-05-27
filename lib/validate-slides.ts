@@ -12,6 +12,11 @@
  * left to the model + prompt; this file catches blatant tease, blatant vagueness, and
  * blatant lack of corrective substance.
  */
+import {
+  FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS,
+  firstCarouselSlideIndex,
+} from "./carousel-slide-limits";
+import { WEAK_FIRST_HOOK_OPENERS } from "./first-slide-hook-copy";
 import type { SlidePlan } from "./types";
 
 export type SlideValidationRule =
@@ -19,7 +24,9 @@ export type SlideValidationRule =
   | "vague_phrase"
   | "duplicate_slide"
   | "no_correction_floor"
-  | "caption_word_in_body";
+  | "caption_word_in_body"
+  | "first_hook_over_cap"
+  | "weak_hook_opener";
 
 export interface SlideValidationError {
   slideOrder: number;
@@ -269,6 +276,34 @@ function checkCorrectiveFloor(slides: SlidePlan[]): SlideValidationError[] {
   ];
 }
 
+function checkFirstSlideHook(slides: SlidePlan[]): SlideValidationError[] {
+  if (slides.length === 0) return [];
+  const idx = firstCarouselSlideIndex(slides);
+  const s = slides[idx]!;
+  const headline = s.headline.trim();
+  const errs: SlideValidationError[] = [];
+  if (headline.length > FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS) {
+    errs.push({
+      slideOrder: s.order,
+      field: "headline",
+      rule: "first_hook_over_cap",
+      detail: `Slide 1 headline is ${headline.length} chars (max ${FIRST_SLIDE_PRIMARY_HEADLINE_MAX_CHARS} for the yellow hook on image 1). Shorten to a complete phrase; move the rest to \`body\`.`,
+    });
+  }
+  for (const { pattern, label } of WEAK_FIRST_HOOK_OPENERS) {
+    if (pattern.test(headline)) {
+      errs.push({
+        slideOrder: s.order,
+        field: "headline",
+        rule: "weak_hook_opener",
+        detail: label,
+      });
+      break;
+    }
+  }
+  return errs;
+}
+
 export function validateSlides(slides: SlidePlan[]): SlideValidationResult {
   if (!slides || slides.length === 0) {
     return { ok: true, errors: [], feedbackForRetry: "" };
@@ -278,6 +313,7 @@ export function validateSlides(slides: SlidePlan[]): SlideValidationResult {
     errors.push(...checkBodyTease(s));
     errors.push(...checkVagueness(s));
   }
+  errors.push(...checkFirstSlideHook(slides));
   errors.push(...checkDuplicates(slides));
   errors.push(...checkCorrectiveFloor(slides));
 

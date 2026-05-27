@@ -1,12 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-
-import {
-  ContentMultiplierMark,
-} from "@/app/components/ContentMultiplierMark";
 import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
 import { stashStitchedFiles } from "@/lib/stitch-handoff";
 import { incrementClipsStitched } from "@/lib/hub/metrics-store";
@@ -468,13 +463,6 @@ export default function StitchPage() {
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-10 sm:py-14">
-      <header className="flex items-center justify-between gap-4">
-        <ContentMultiplierMark as="div" compact />
-        <Link href="/" className="text-sm font-medium text-stone-600 hover:text-stone-900">
-          ← Back to single clip
-        </Link>
-      </header>
-
       <section>
         <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
           Stitch
