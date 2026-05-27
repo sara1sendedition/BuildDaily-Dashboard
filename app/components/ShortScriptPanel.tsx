@@ -1,11 +1,14 @@
 "use client";
 
+import { useMemo } from "react";
 import {
-  isSegmentRemovedByRemovals,
-  scriptSegmentTimeLabel,
-  toggleSegmentInRemovals,
+  groupWordsIntoParagraphs,
+  isWordRemovedByRemovals,
+  scriptWordCount,
+  scriptWordTimeLabel,
+  toggleWordInRemovals,
   type TranscriptScriptData,
-  type TranscriptScriptSegment,
+  type TranscriptScriptWord,
 } from "@/lib/short-script-types";
 import type { TimelineRemoval } from "@/lib/short-timeline-types";
 
@@ -14,8 +17,8 @@ type Props = {
   removals: TimelineRemoval[];
   duration: number;
   busy: boolean;
-  selectedSegmentId: number | null;
-  onSelectSegment: (id: number | null) => void;
+  selectedWordId: number | null;
+  onSelectWord: (id: number | null) => void;
   onRemovalsChange: (removals: TimelineRemoval[]) => void;
   onSeek: (sec: number) => void;
 };
@@ -25,74 +28,102 @@ export function ShortScriptPanel({
   removals,
   duration,
   busy,
-  selectedSegmentId,
-  onSelectSegment,
+  selectedWordId,
+  onSelectWord,
   onRemovalsChange,
   onSeek,
 }: Props) {
-  const removedCount = script.segments.filter((s) =>
-    isSegmentRemovedByRemovals(s, removals)
-  ).length;
-  const keptCount = script.segments.length - removedCount;
+  const paragraphs = useMemo(
+    () => groupWordsIntoParagraphs(script.words),
+    [script.words]
+  );
 
-  const handleToggle = (seg: TranscriptScriptSegment) => {
+  const speechWords = script.words.filter((w) => w.kind === "word");
+  const removedCount = speechWords.filter((w) =>
+    isWordRemovedByRemovals(w, removals)
+  ).length;
+  const keptCount = speechWords.length - removedCount;
+  const totalWords = scriptWordCount(script);
+
+  const handleToggle = (word: TranscriptScriptWord) => {
     if (busy) return;
-    onRemovalsChange(toggleSegmentInRemovals(seg, removals, duration));
-    onSelectSegment(seg.id);
-    onSeek(seg.start_sec);
+    onRemovalsChange(toggleWordInRemovals(word, removals, duration));
+    onSelectWord(word.id);
+    onSeek(word.start_sec);
   };
 
   return (
     <div className="script-panel">
       <p className="timeline-intro">
-        Tap a line to <strong>cut</strong> or <strong>restore</strong> it. Removed
-        lines are struck through and won&apos;t appear in the output after you
-        re-run. Silence trims stay on the Timeline tab.
+        Click any <strong>word</strong> to cut or restore it (Descript-style).
+        Cut words are struck through and drop out after you re-run. Silence
+        blocks are one click. Timestamps match the editorial reference video.
+        Fine trims stay on the Timeline tab.
       </p>
 
       <p className="timeline-stats">
-        {keptCount} kept · {removedCount} removed · {script.segments.length} lines
+        {keptCount} words kept · {removedCount} cut · {totalWords} total
       </p>
 
-      <ol className="script-segment-list">
-        {script.segments.map((seg) => {
-          const removed = isSegmentRemovedByRemovals(seg, removals);
-          const selected = selectedSegmentId === seg.id;
-          return (
-            <li
-              key={seg.id}
-              className={`script-segment-row${removed ? " removed" : " kept"}${selected ? " selected" : ""}`}
-            >
+      <div className="script-document" role="document" aria-label="Transcript">
+        {paragraphs.map((para, pi) => {
+          const gapOnly = para.length === 1 && para[0]?.kind === "gap";
+          if (gapOnly) {
+            const gap = para[0]!;
+            const removed = isWordRemovedByRemovals(gap, removals);
+            const selected = selectedWordId === gap.id;
+            return (
               <button
+                key={`gap-${gap.id}-${pi}`}
                 type="button"
-                className="script-segment-btn"
+                className={`script-gap-block${removed ? " removed" : ""}${selected ? " selected" : ""}`}
                 disabled={busy}
-                aria-pressed={removed}
-                title={
-                  removed
-                    ? "Click to restore this line in the output"
-                    : "Click to cut this line from the output"
-                }
-                onClick={() => handleToggle(seg)}
+                onClick={() => handleToggle(gap)}
+                title={scriptWordTimeLabel(gap)}
               >
-                <span className="script-segment-meta">
-                  <span className="script-segment-time">
-                    {scriptSegmentTimeLabel(seg)}
-                  </span>
-                  <span
-                    className={`script-segment-badge${removed ? " cut" : " keep"}`}
-                  >
-                    {removed ? "Removed" : "Kept"}
-                  </span>
-                </span>
-                <span className={`script-segment-text${removed ? " struck" : ""}`}>
-                  {seg.text}
-                </span>
+                {gap.text}
               </button>
-            </li>
+            );
+          }
+          return (
+            <p key={`p-${pi}`} className="script-paragraph">
+              {para.map((word) => {
+                if (word.kind === "gap") {
+                  const removed = isWordRemovedByRemovals(word, removals);
+                  const selected = selectedWordId === word.id;
+                  return (
+                    <button
+                      key={`gap-${word.id}`}
+                      type="button"
+                      className={`script-gap-inline${removed ? " removed" : ""}${selected ? " selected" : ""}`}
+                      disabled={busy}
+                      onClick={() => handleToggle(word)}
+                      title={scriptWordTimeLabel(word)}
+                    >
+                      {word.text}
+                    </button>
+                  );
+                }
+                const removed = isWordRemovedByRemovals(word, removals);
+                const selected = selectedWordId === word.id;
+                return (
+                  <button
+                    key={word.id}
+                    type="button"
+                    className={`script-word${removed ? " removed" : " kept"}${selected ? " selected" : ""}`}
+                    disabled={busy}
+                    aria-pressed={removed}
+                    title={`${scriptWordTimeLabel(word)} — click to ${removed ? "restore" : "cut"}`}
+                    onClick={() => handleToggle(word)}
+                  >
+                    {word.text}
+                  </button>
+                );
+              })}
+            </p>
           );
         })}
-      </ol>
+      </div>
     </div>
   );
 }

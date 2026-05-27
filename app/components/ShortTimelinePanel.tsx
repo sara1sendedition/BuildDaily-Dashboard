@@ -53,16 +53,16 @@ export function ShortTimelinePanel({
     initialTimeline.removals.map((r) => normalizeRemoval({ ...r }))
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedScriptId, setSelectedScriptId] = useState<number | null>(null);
+  const [selectedWordId, setSelectedWordId] = useState<number | null>(null);
   const [view, setView] = useState<"script" | "timeline">(
-    script?.segments.length ? "script" : "timeline"
+    script?.words.length ? "script" : "timeline"
   );
 
   useEffect(() => {
     setRemovals(initialTimeline.removals.map((r) => normalizeRemoval({ ...r })));
     setSelectedId(null);
-    setSelectedScriptId(null);
-    if (script?.segments.length) {
+    setSelectedWordId(null);
+    if (script?.words.length) {
       setView("script");
     }
   }, [jobId, initialTimeline, script]);
@@ -200,7 +200,7 @@ export function ShortTimelinePanel({
   }, [removals, duration]);
 
   const enabledCuts = removals.filter((r) => r.enabled);
-  const showScriptTab = Boolean(script?.segments.length);
+  const showScriptTab = Boolean(script?.words.length);
 
   return (
     <div className="short-timeline-panel timeline-panel">
@@ -231,7 +231,9 @@ export function ShortTimelinePanel({
         <>
           <div className="timeline-videos timeline-videos-compact">
             <div>
-              <span className="timeline-video-label">Source (scrub while editing)</span>
+              <span className="timeline-video-label">
+                Editorial reference (scrub while editing)
+              </span>
               <video
                 ref={videoRef}
                 className="timeline-video"
@@ -260,8 +262,8 @@ export function ShortTimelinePanel({
             removals={removals}
             duration={duration}
             busy={busy}
-            selectedSegmentId={selectedScriptId}
-            onSelectSegment={setSelectedScriptId}
+            selectedWordId={selectedWordId}
+            onSelectWord={setSelectedWordId}
             onRemovalsChange={setRemovals}
             onSeek={seek}
           />
@@ -269,7 +271,7 @@ export function ShortTimelinePanel({
       ) : (
         <>
       <p className="timeline-intro">
-        Red regions are removed on the <strong>original upload</strong> timeline (
+        Red regions are removed on the <strong>editorial reference</strong> timeline (
         {formatTimelineTime(0)}–{formatTimelineTime(duration)}). Drag the handles on
         a selected cut to shorten or lengthen it, or edit in/out times below. Uncheck
         to keep a section. Then re-run.
@@ -277,7 +279,7 @@ export function ShortTimelinePanel({
 
       <div className="timeline-videos">
         <div>
-          <span className="timeline-video-label">Source (for cuts)</span>
+          <span className="timeline-video-label">Editorial reference (for cuts)</span>
           <video
             ref={videoRef}
             className="timeline-video"

@@ -74,7 +74,7 @@ export function ShortTimelineAdvancedModal({
       }
       if (cancelled?.()) return;
       const scriptDuration =
-        parsedScript?.segments.reduce(
+        parsedScript?.words.reduce(
           (max, s) => Math.max(max, s.end_sec),
           0
         ) ?? 0;
@@ -83,7 +83,7 @@ export function ShortTimelineAdvancedModal({
         parsedTimeline ??
           emptyTimeline(
             scriptDuration ||
-              parsedScript?.segments[parsedScript.segments.length - 1]?.end_sec ||
+              parsedScript?.words[parsedScript.words.length - 1]?.end_sec ||
               60
           )
       );
