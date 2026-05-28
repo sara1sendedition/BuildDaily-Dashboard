@@ -3,8 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DriveClipPickerModal } from "@/app/components/DriveClipPickerModal";
+import type { DriveInboxFile } from "@/app/components/DriveInboxPanel";
 import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
 import { fetchDriveInboxConfigured } from "@/lib/drive-inbox-available";
+import {
+  clipBytesEstimate,
+  clipDetailLine,
+  clipDisplayName,
+  driveClipsFromInbox,
+  resolveClipsToFiles,
+  type ClipEntry,
+} from "@/lib/stitch-clips";
 import { stashStitchedFiles } from "@/lib/stitch-handoff";
 import { incrementClipsStitched } from "@/lib/hub/metrics-store";
 import {
@@ -47,11 +56,6 @@ import {
  *     and the recovery banner on next mount lets the user resume — the
  *     output is still server-side, identified by jobId.
  */
-
-type ClipEntry = {
-  id: string;
-  file: File;
-};
 
 type StitchRow = {
   id: string;
@@ -162,7 +166,29 @@ export default function StitchPage() {
         r.id === rowId
           ? {
               ...r,
-              clips: [...r.clips, ...incoming.map((f) => ({ id: safeRandomId(), file: f }))],
+              clips: [
+                ...r.clips,
+                ...incoming.map((f) => ({
+                  id: safeRandomId(),
+                  source: "device" as const,
+                  file: f,
+                })),
+              ],
+            }
+          : r
+      )
+    );
+    return true;
+  }
+
+  function addDriveClipsToRow(rowId: string, picks: DriveInboxFile[]): boolean {
+    if (!picks.length) return false;
+    setRows((prev) =>
+      prev.map((r) =>
+        r.id === rowId
+          ? {
+              ...r,
+              clips: [...r.clips, ...driveClipsFromInbox(picks)],
             }
           : r
       )
@@ -250,8 +276,9 @@ export default function StitchPage() {
   }
 
   function stitchedNameFromRow(row: StitchRow, index: number): string {
-    const first = row.clips[0]?.file.name ?? `row-${index + 1}.mp4`;
-    const stem = first.replace(/\.[^/.]+$/i, "").trim() || `row-${index + 1}`;
+    const first = row.clips[0];
+    const name = first ? clipDisplayName(first) : `row-${index + 1}.mp4`;
+    const stem = name.replace(/\.[^/.]+$/i, "").trim() || `row-${index + 1}`;
     return `${stem}_stitched.mp4`;
   }
 
@@ -277,7 +304,7 @@ export default function StitchPage() {
       status: "pending",
       aiInstructions: row.aiInstructions.trim() || undefined,
       outputFilename: stitchedNameFromRow(row, i),
-      clipNames: row.clips.map((c) => c.file.name),
+      clipNames: row.clips.map((c) => clipDisplayName(c)),
     }));
     const batchState: StitchBatchState = {
       batchId,
@@ -298,12 +325,16 @@ export default function StitchPage() {
         const rowState = initialRows[i];
         const label = `Video ${i + 1} of ${nonEmptyRows.length}`;
 
-        if (row.clips.length === 1) {
+        const resolvedFiles = await resolveClipsToFiles(row.clips, (msg) =>
+          setProgressMsg(`${label}: ${msg}`)
+        );
+
+        if (resolvedFiles.length === 1) {
           // Single-clip rows skip the server round-trip entirely — the
           // home page can ingest the original file directly. Mark the row
           // "completed" in localStorage so the resume banner is accurate.
           setProgressMsg(`${label}: one clip, skipping stitch…`);
-          const only = row.clips[0].file;
+          const only = resolvedFiles[0]!;
           handoffFiles.push({
             blob: only,
             name: only.name || stitchedNameFromRow(row, i),
@@ -314,10 +345,10 @@ export default function StitchPage() {
         }
 
         patchStitchRow(i, { status: "uploading" });
-        setProgressMsg(`${label}: uploading ${row.clips.length} clips…`);
+        setProgressMsg(`${label}: uploading ${resolvedFiles.length} clips…`);
 
         const { jobId, blob } = await runStitchRow(
-          row.clips.map((c) => c.file),
+          resolvedFiles,
           rowState.correlationId,
           (msg) => setProgressMsg(`${label}: ${msg}`),
           (jid) => {
@@ -479,8 +510,11 @@ export default function StitchPage() {
   const nonEmptyRows = rows.filter((r) => r.clips.length > 0);
   const totalClips = rows.reduce((sum, r) => sum + r.clips.length, 0);
   const totalBytes = rows.reduce(
-    (sum, r) => sum + r.clips.reduce((a, c) => a + c.file.size, 0),
+    (sum, r) => sum + r.clips.reduce((a, c) => a + clipBytesEstimate(c), 0),
     0
+  );
+  const hasDriveClips = rows.some((r) =>
+    r.clips.some((c) => c.source === "drive")
   );
   const busy =
     status === "uploading" ||
@@ -495,8 +529,14 @@ export default function StitchPage() {
         </h1>
         <p className="mt-2 text-sm text-stone-600">
           Add clips per video from your <strong>device</strong> or{" "}
-          <strong>Google Drive</strong> inbox, then process when ready.
+          <strong>Google Drive</strong> inbox, then process when ready. Drive clips
+          download when you click Process, not when you add them.
         </p>
+        {hasDriveClips && !busy ? (
+          <p className="mt-1 text-xs text-palette-depth">
+            Google Drive clips in your list will download when you process.
+          </p>
+        ) : null}
         {driveInboxConfigured === false ? (
           <p className="mt-1 text-xs text-amber-800">
             Google Drive inbox is not configured on the Video to Short backend
@@ -697,12 +737,9 @@ export default function StitchPage() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium text-stone-900">
-                          {c.file.name}
+                          {clipDisplayName(c)}
                         </p>
-                        <p className="text-xs text-stone-500">
-                          {formatBytes(c.file.size)}
-                          {c.file.type ? ` · ${c.file.type}` : ""}
-                        </p>
+                        <p className="text-xs text-stone-500">{clipDetailLine(c)}</p>
                       </div>
                       <div className="flex items-center gap-1">
                         <button
@@ -803,9 +840,9 @@ export default function StitchPage() {
         open={driveModalRowId !== null}
         onClose={() => setDriveModalRowId(null)}
         disabled={busy}
-        onAddClips={(files) => {
+        onAddClips={(picks) => {
           if (!driveModalRowId) return false;
-          return addFilesToRow(driveModalRowId, files);
+          return addDriveClipsToRow(driveModalRowId, picks);
         }}
       />
 
