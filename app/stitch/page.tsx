@@ -102,11 +102,11 @@ export default function StitchPage() {
   const [progressMsg, setProgressMsg] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const clipMenuRef = useRef<HTMLDivElement | null>(null);
   const [pickerRowId, setPickerRowId] = useState<string | null>(null);
-  const [clipMenuRowId, setClipMenuRowId] = useState<string | null>(null);
   const [driveModalRowId, setDriveModalRowId] = useState<string | null>(null);
-  const [driveInboxConfigured, setDriveInboxConfigured] = useState(false);
+  const [driveInboxConfigured, setDriveInboxConfigured] = useState<boolean | null>(
+    null,
+  );
   const [dragOverVideoId, setDragOverVideoId] = useState<string | null>(null);
   const [recoveryBanner, setRecoveryBanner] =
     useState<RecoveryBannerState | null>(null);
@@ -146,20 +146,6 @@ export default function StitchPage() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!clipMenuRowId) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (
-        clipMenuRef.current &&
-        !clipMenuRef.current.contains(e.target as Node)
-      ) {
-        setClipMenuRowId(null);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [clipMenuRowId]);
-
   function addFilesToRow(rowId: string, files: FileList | File[]): boolean {
     const all = Array.from(files);
     const incoming = all.filter(isProbablyVideo);
@@ -192,7 +178,6 @@ export default function StitchPage() {
   }
 
   function removeRow(rowId: string): void {
-    setClipMenuRowId((id) => (id === rowId ? null : id));
     setDriveModalRowId((id) => (id === rowId ? null : id));
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
@@ -508,6 +493,16 @@ export default function StitchPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
           Stitch
         </h1>
+        <p className="mt-2 text-sm text-stone-600">
+          Add clips per video from your <strong>device</strong> or{" "}
+          <strong>Google Drive</strong> inbox, then process when ready.
+        </p>
+        {driveInboxConfigured === false ? (
+          <p className="mt-1 text-xs text-amber-800">
+            Google Drive inbox is not configured on the Video to Short backend
+            yet — the Drive button will explain what to set in Coolify.
+          </p>
+        ) : null}
       </section>
 
       {recoveryBanner && (
@@ -622,62 +617,26 @@ export default function StitchPage() {
                     ({row.clips.length} clip{row.clips.length === 1 ? "" : "s"})
                   </span>
                 </p>
-                <div className="flex items-center gap-1">
-                  <div
-                    ref={clipMenuRowId === row.id ? clipMenuRef : undefined}
-                    className="relative"
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setPickerRowId(row.id);
+                      fileInputRef.current?.click();
+                    }}
+                    className="rounded border border-stone-300 px-2 py-1 text-xs text-stone-700 hover:bg-stone-50 disabled:opacity-40"
                   >
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        setClipMenuRowId((prev) =>
-                          prev === row.id ? null : row.id
-                        )
-                      }
-                      className="rounded border border-stone-300 px-2 py-1 text-xs text-stone-700 hover:bg-stone-50 disabled:opacity-40"
-                      aria-expanded={clipMenuRowId === row.id}
-                      aria-haspopup="menu"
-                    >
-                      Add clips ▾
-                    </button>
-                    {clipMenuRowId === row.id ? (
-                      <div
-                        role="menu"
-                        className="absolute right-0 top-full z-20 mt-1 min-w-[10.5rem] rounded-md border border-stone-200 bg-white py-1 shadow-lg"
-                      >
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="block w-full px-3 py-1.5 text-left text-xs text-stone-800 hover:bg-stone-50"
-                          onClick={() => {
-                            setClipMenuRowId(null);
-                            setPickerRowId(row.id);
-                            fileInputRef.current?.click();
-                          }}
-                        >
-                          From device…
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={!driveInboxConfigured}
-                          title={
-                            driveInboxConfigured
-                              ? undefined
-                              : "Google Drive inbox is not configured on the backend"
-                          }
-                          className="block w-full px-3 py-1.5 text-left text-xs text-stone-800 hover:bg-stone-50 disabled:cursor-not-allowed disabled:text-stone-400"
-                          onClick={() => {
-                            setClipMenuRowId(null);
-                            setDriveModalRowId(row.id);
-                          }}
-                        >
-                          Google Drive…
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
+                    From device
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setDriveModalRowId(row.id)}
+                    className="rounded border border-palette-teal bg-palette-pale/30 px-2 py-1 text-xs font-medium text-palette-depth hover:bg-palette-pale/50 disabled:opacity-40"
+                  >
+                    Google Drive
+                  </button>
                   <button
                     type="button"
                     disabled={busy}
