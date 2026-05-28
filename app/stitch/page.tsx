@@ -529,8 +529,9 @@ export default function StitchPage() {
         </h1>
         <p className="mt-2 text-sm text-stone-600">
           Add clips per video from your <strong>device</strong> or{" "}
-          <strong>Google Drive</strong> inbox, then process when ready. Drive clips
-          download when you click Process, not when you add them.
+          <strong>Google Drive</strong> inbox, then click{" "}
+          <strong>Process … → home</strong> when ready. Google Drive videos are
+          not downloaded until that step.
         </p>
         {hasDriveClips && !busy ? (
           <p className="mt-1 text-xs text-palette-depth">
