@@ -321,13 +321,15 @@ export default function StitchPage() {
       name: string;
       aiInstructions?: string;
     }> = [];
+    const failedRows: Array<{ videoNum: number; message: string }> = [];
 
-    try {
-      for (let i = 0; i < nonEmptyRows.length; i++) {
-        const row = nonEmptyRows[i];
-        const rowState = initialRows[i];
-        const label = `Video ${i + 1} of ${nonEmptyRows.length}`;
+    for (let i = 0; i < nonEmptyRows.length; i++) {
+      const row = nonEmptyRows[i];
+      const rowState = initialRows[i];
+      const label = `Video ${i + 1} of ${nonEmptyRows.length}`;
+      const videoNum = i + 1;
 
+      try {
         if (rowIsAllDrive(row.clips) && row.clips.length > 1) {
           patchStitchRow(i, { status: "uploading" });
           setProgressMsg(
@@ -355,9 +357,6 @@ export default function StitchPage() {
         );
 
         if (resolvedFiles.length === 1) {
-          // Single-clip rows skip the server round-trip entirely — the
-          // home page can ingest the original file directly. Mark the row
-          // "completed" in localStorage so the resume banner is accurate.
           setProgressMsg(`${label}: one clip, skipping stitch…`);
           const only = resolvedFiles[0]!;
           handoffFiles.push({
@@ -377,9 +376,6 @@ export default function StitchPage() {
           rowState.correlationId,
           (msg) => setProgressMsg(`${label}: ${msg}`),
           (jid) => {
-            // First moment we know the server-side jobId — persist it
-            // immediately so a tab crash after this point is recoverable
-            // via the jobId path (cheaper than correlation-id lookup).
             patchStitchRow(i, { jobId: jid, status: "processing" });
           }
         );
@@ -390,21 +386,40 @@ export default function StitchPage() {
           name: rowState.outputFilename,
           aiInstructions: row.aiInstructions.trim() || undefined,
         });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Stitch failed.";
+        patchStitchRow(i, { status: "failed", error: message });
+        failedRows.push({ videoNum, message });
+        setProgressMsg(`${label} failed — continuing with the next video…`);
       }
-
-      setStatus("redirecting");
-      setProgressMsg("All videos stitched. Handing off to home queue…");
-      await stashStitchedFiles(handoffFiles);
-      incrementClipsStitched();
-      clearStitchBatch();
-      router.push("/multiplier?fromStitch=1");
-    } catch (e) {
-      setStatus("error");
-      setErrorMsg(e instanceof Error ? e.message : "Bulk video stitch failed.");
-      // Leave the batch state in localStorage so the user can refresh and
-      // resume from the recovery banner — the server may still finish the
-      // in-flight row even though our fetch chain bailed.
     }
+
+    if (handoffFiles.length === 0) {
+      setStatus("error");
+      if (failedRows.length === 1) {
+        setErrorMsg(failedRows[0]!.message);
+      } else {
+        setErrorMsg(
+          `All ${failedRows.length} videos failed. ${failedRows
+            .map((f) => `Video ${f.videoNum}: ${f.message}`)
+            .join(" ")}`
+        );
+      }
+      return;
+    }
+
+    setStatus("redirecting");
+    const skippedNote =
+      failedRows.length > 0
+        ? ` Skipped Video${failedRows.length === 1 ? "" : "s"} ${failedRows.map((f) => f.videoNum).join(", ")} (${failedRows.length} failed).`
+        : "";
+    setProgressMsg(
+      `Handing off ${handoffFiles.length} stitched video${handoffFiles.length === 1 ? "" : "s"} to home queue…${skippedNote}`
+    );
+    await stashStitchedFiles(handoffFiles);
+    incrementClipsStitched();
+    clearStitchBatch();
+    router.push("/multiplier?fromStitch=1");
   }
 
   /**
@@ -538,9 +553,6 @@ export default function StitchPage() {
     (sum, r) => sum + r.clips.reduce((a, c) => a + clipBytesEstimate(c), 0),
     0
   );
-  const hasDriveClips = rows.some((r) =>
-    r.clips.some((c) => c.source === "drive")
-  );
   const busy =
     status === "uploading" ||
     status === "redirecting" ||
@@ -552,17 +564,6 @@ export default function StitchPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
           Stitch
         </h1>
-        <p className="mt-2 text-sm text-stone-600">
-          Add clips per video from your <strong>device</strong> or{" "}
-          <strong>Google Drive</strong> inbox, then click{" "}
-          <strong>Process … → home</strong> when ready. Google Drive videos are
-          not downloaded until that step.
-        </p>
-        {hasDriveClips && !busy ? (
-          <p className="mt-1 text-xs text-palette-depth">
-            Google Drive clips in your list will download when you process.
-          </p>
-        ) : null}
         {driveInboxConfigured === false ? (
           <p className="mt-1 text-xs text-amber-800">
             Google Drive inbox is not configured on the Video to Short backend
