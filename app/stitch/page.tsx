@@ -12,6 +12,8 @@ import {
   clipDisplayName,
   driveClipsFromInbox,
   resolveClipsToFiles,
+  rowDriveIds,
+  rowIsAllDrive,
   type ClipEntry,
 } from "@/lib/stitch-clips";
 import { stashStitchedFiles } from "@/lib/stitch-handoff";
@@ -21,6 +23,7 @@ import {
   pollStitchJobUntilDone,
   recoverStitchJobIdByCorrelationId,
   runStitchRow,
+  runStitchRowFromDrive,
 } from "@/lib/run-stitch";
 import {
   clearStitchBatch,
@@ -324,6 +327,28 @@ export default function StitchPage() {
         const row = nonEmptyRows[i];
         const rowState = initialRows[i];
         const label = `Video ${i + 1} of ${nonEmptyRows.length}`;
+
+        if (rowIsAllDrive(row.clips) && row.clips.length > 1) {
+          patchStitchRow(i, { status: "uploading" });
+          setProgressMsg(
+            `${label}: server pulling ${row.clips.length} clips from Google Drive (no browser download per clip)…`
+          );
+          const { jobId, blob } = await runStitchRowFromDrive(
+            rowDriveIds(row.clips),
+            rowState.correlationId,
+            (msg) => setProgressMsg(`${label}: ${msg}`),
+            (jid) => {
+              patchStitchRow(i, { jobId: jid, status: "processing" });
+            }
+          );
+          patchStitchRow(i, { jobId, status: "completed" });
+          handoffFiles.push({
+            blob,
+            name: rowState.outputFilename,
+            aiInstructions: row.aiInstructions.trim() || undefined,
+          });
+          continue;
+        }
 
         const resolvedFiles = await resolveClipsToFiles(row.clips, (msg) =>
           setProgressMsg(`${label}: ${msg}`)

@@ -28,13 +28,23 @@ export function clipDetailLine(clip: ClipEntry): string {
   }
   const size =
     clip.sizeMb != null ? `${clip.sizeMb} MB` : "Size unknown";
-  return `${size} · Google Drive (downloads on Process)`;
+  return `${size} · Google Drive (server pulls on Process)`;
 }
 
 export function clipBytesEstimate(clip: ClipEntry): number {
   if (clip.source === "device") return clip.file.size;
   if (clip.sizeMb != null) return clip.sizeMb * 1024 * 1024;
   return 0;
+}
+
+export function rowIsAllDrive(clips: ClipEntry[]): boolean {
+  return clips.length > 0 && clips.every((c) => c.source === "drive");
+}
+
+export function rowDriveIds(clips: ClipEntry[]): string[] {
+  return clips
+    .filter((c): c is DriveClipEntry => c.source === "drive")
+    .map((c) => c.driveId);
 }
 
 export function driveClipsFromInbox(files: DriveInboxFile[]): DriveClipEntry[] {
@@ -76,8 +86,10 @@ export async function resolveClipsToFiles(
       continue;
     }
     driveDone += 1;
+    const sizeHint =
+      clip.sizeMb != null ? ` (~${clip.sizeMb} MB)` : "";
     onProgress?.(
-      `Downloading from Google Drive (${driveDone}/${driveTotal}): ${clip.name}…`
+      `Downloading from Google Drive (${driveDone}/${driveTotal}): ${clip.name}${sizeHint} — large files can take several minutes; Network may show "pending" until each finishes…`
     );
     files.push(await downloadDriveInboxClip(clip.driveId, clip.name));
   }

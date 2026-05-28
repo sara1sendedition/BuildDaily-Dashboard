@@ -133,6 +133,69 @@ export async function uploadStitchRow(
   };
 }
 
+/** Stitch-only: server pulls Drive inbox clips (no browser download of sources). */
+export async function uploadStitchRowFromDrive(
+  fileIds: string[],
+  correlationId: string
+): Promise<StitchUploadResult> {
+  if (fileIds.length < 2) {
+    throw new Error("At least two Drive clips are required to stitch on the server.");
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(clientApiPath("/api/video-to-short/stitch-from-drive"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file_ids: fileIds,
+        client_correlation_id: correlationId,
+      }),
+    });
+  } catch (e) {
+    throw new Error(
+      `Could not reach the stitch server. ${
+        e instanceof Error ? e.message : ""
+      }`.trim()
+    );
+  }
+
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string; detail?: string };
+      detail =
+        (typeof body?.detail === "string" && body.detail.trim()) ||
+        (typeof body?.error === "string" && body.error.trim()) ||
+        detail;
+    } catch {
+      try {
+        const text = await res.text();
+        if (text) detail = text;
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new Error(`Drive stitch rejected: ${detail}`);
+  }
+
+  let body: { id?: string; status?: string };
+  try {
+    body = (await res.json()) as { id?: string; status?: string };
+  } catch {
+    throw new Error("Drive stitch returned a malformed response.");
+  }
+
+  if (typeof body?.id !== "string" || !body.id.trim()) {
+    throw new Error("Drive stitch response missing job id.");
+  }
+
+  return {
+    jobId: body.id.trim(),
+    status: typeof body.status === "string" ? body.status : "pending",
+  };
+}
+
 /**
  * Recover the server-side jobId after a lost upload response. Returns null
  * if no job has been registered for this correlationId yet (e.g. the upload
@@ -235,6 +298,38 @@ export async function runStitchRow(
     jobId = upload.jobId;
   } catch (e) {
     // Upload-response lost? Try recovery before surfacing the error.
+    const recovered = await recoverStitchJobIdByCorrelationId(
+      correlationId
+    ).catch(() => null);
+    if (!recovered) throw e;
+    jobId = recovered;
+  }
+  onJobId?.(jobId);
+  onProgress?.("Stitching on the server…");
+  await pollStitchJobUntilDone(jobId, onProgress);
+  onProgress?.("Downloading stitched video…");
+  const blob = await downloadStitchOutput(jobId);
+  return { jobId, blob };
+}
+
+/**
+ * Drive-only multi-clip row: server downloads from inbox, stitches, client
+ * polls and downloads the single stitched output (one browser download).
+ */
+export async function runStitchRowFromDrive(
+  fileIds: string[],
+  correlationId: string,
+  onProgress?: (msg: string) => void,
+  onJobId?: (jobId: string) => void
+): Promise<{ jobId: string; blob: Blob }> {
+  onProgress?.(
+    "Server is downloading clips from Google Drive and stitching (this can take a while)…"
+  );
+  let jobId: string;
+  try {
+    const upload = await uploadStitchRowFromDrive(fileIds, correlationId);
+    jobId = upload.jobId;
+  } catch (e) {
     const recovered = await recoverStitchJobIdByCorrelationId(
       correlationId
     ).catch(() => null);
