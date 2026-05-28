@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { DriveClipPickerModal } from "@/app/components/DriveClipPickerModal";
 import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
+import { fetchDriveInboxConfigured } from "@/lib/drive-inbox-available";
 import { stashStitchedFiles } from "@/lib/stitch-handoff";
 import { incrementClipsStitched } from "@/lib/hub/metrics-store";
 import {
@@ -100,7 +102,11 @@ export default function StitchPage() {
   const [progressMsg, setProgressMsg] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const clipMenuRef = useRef<HTMLDivElement | null>(null);
   const [pickerRowId, setPickerRowId] = useState<string | null>(null);
+  const [clipMenuRowId, setClipMenuRowId] = useState<string | null>(null);
+  const [driveModalRowId, setDriveModalRowId] = useState<string | null>(null);
+  const [driveInboxConfigured, setDriveInboxConfigured] = useState(false);
   const [dragOverVideoId, setDragOverVideoId] = useState<string | null>(null);
   const [recoveryBanner, setRecoveryBanner] =
     useState<RecoveryBannerState | null>(null);
@@ -130,9 +136,41 @@ export default function StitchPage() {
     });
   }, []);
 
-  function addFilesToRow(rowId: string, files: FileList | File[]): void {
-    const incoming = Array.from(files).filter(isProbablyVideo);
-    if (!incoming.length) return;
+  useEffect(() => {
+    let cancelled = false;
+    void fetchDriveInboxConfigured().then((configured) => {
+      if (!cancelled) setDriveInboxConfigured(configured);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!clipMenuRowId) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (
+        clipMenuRef.current &&
+        !clipMenuRef.current.contains(e.target as Node)
+      ) {
+        setClipMenuRowId(null);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [clipMenuRowId]);
+
+  function addFilesToRow(rowId: string, files: FileList | File[]): boolean {
+    const all = Array.from(files);
+    const incoming = all.filter(isProbablyVideo);
+    if (!incoming.length) {
+      if (all.length > 0) {
+        setErrorMsg(
+          "No recognized video files were added. Use .mp4, .mov, .webm, or similar.",
+        );
+      }
+      return false;
+    }
     setRows((prev) =>
       prev.map((r) =>
         r.id === rowId
@@ -143,6 +181,7 @@ export default function StitchPage() {
           : r
       )
     );
+    return true;
   }
 
   function addRow(): void {
@@ -153,6 +192,8 @@ export default function StitchPage() {
   }
 
   function removeRow(rowId: string): void {
+    setClipMenuRowId((id) => (id === rowId ? null : id));
+    setDriveModalRowId((id) => (id === rowId ? null : id));
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
       return next.length > 0
@@ -582,17 +623,61 @@ export default function StitchPage() {
                   </span>
                 </p>
                 <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => {
-                      setPickerRowId(row.id);
-                      fileInputRef.current?.click();
-                    }}
-                    className="rounded border border-stone-300 px-2 py-1 text-xs text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                  <div
+                    ref={clipMenuRowId === row.id ? clipMenuRef : undefined}
+                    className="relative"
                   >
-                    Add clips
-                  </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        setClipMenuRowId((prev) =>
+                          prev === row.id ? null : row.id
+                        )
+                      }
+                      className="rounded border border-stone-300 px-2 py-1 text-xs text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+                      aria-expanded={clipMenuRowId === row.id}
+                      aria-haspopup="menu"
+                    >
+                      Add clips ▾
+                    </button>
+                    {clipMenuRowId === row.id ? (
+                      <div
+                        role="menu"
+                        className="absolute right-0 top-full z-20 mt-1 min-w-[10.5rem] rounded-md border border-stone-200 bg-white py-1 shadow-lg"
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="block w-full px-3 py-1.5 text-left text-xs text-stone-800 hover:bg-stone-50"
+                          onClick={() => {
+                            setClipMenuRowId(null);
+                            setPickerRowId(row.id);
+                            fileInputRef.current?.click();
+                          }}
+                        >
+                          From device…
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={!driveInboxConfigured}
+                          title={
+                            driveInboxConfigured
+                              ? undefined
+                              : "Google Drive inbox is not configured on the backend"
+                          }
+                          className="block w-full px-3 py-1.5 text-left text-xs text-stone-800 hover:bg-stone-50 disabled:cursor-not-allowed disabled:text-stone-400"
+                          onClick={() => {
+                            setClipMenuRowId(null);
+                            setDriveModalRowId(row.id);
+                          }}
+                        >
+                          Google Drive…
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     disabled={busy}
@@ -754,6 +839,16 @@ export default function StitchPage() {
           )}
         </section>
       )}
+
+      <DriveClipPickerModal
+        open={driveModalRowId !== null}
+        onClose={() => setDriveModalRowId(null)}
+        disabled={busy}
+        onAddClips={(files) => {
+          if (!driveModalRowId) return false;
+          return addFilesToRow(driveModalRowId, files);
+        }}
+      />
 
     </main>
   );

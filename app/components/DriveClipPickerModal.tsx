@@ -1,0 +1,426 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { clientApiPath } from "@/lib/client-api-path";
+import type { DriveInboxFile } from "@/app/components/DriveInboxPanel";
+
+type Props = {
+  open: boolean;
+  onClose: () => void;
+  /** Selected inbox videos are downloaded in checkbox order. Return false to keep the modal open. */
+  onAddClips: (files: File[]) => boolean;
+  disabled?: boolean;
+};
+
+function videoMimeFromName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".mkv")) return "video/x-matroska";
+  if (lower.endsWith(".m4v")) return "video/x-m4v";
+  return "video/mp4";
+}
+
+type PanelMode =
+  | "loading"
+  | "missing-api"
+  | "not-configured"
+  | "ready"
+  | "error";
+
+function filenameFromDisposition(header: string | null, fallback: string): string {
+  if (!header) return fallback;
+  const m = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(header);
+  if (m?.[1]) {
+    try {
+      return decodeURIComponent(m[1].replace(/"/g, ""));
+    } catch {
+      return m[1];
+    }
+  }
+  return fallback;
+}
+
+async function blobToVideoFile(
+  res: Response,
+  fallbackName: string
+): Promise<File> {
+  const blob = await res.blob();
+  const name = filenameFromDisposition(
+    res.headers.get("content-disposition"),
+    fallbackName
+  );
+  const type =
+    blob.type && blob.type !== "application/octet-stream"
+      ? blob.type
+      : videoMimeFromName(name);
+  return new File([blob], name, { type });
+}
+
+function driveThumbnailUrl(fileId: string): string {
+  return clientApiPath(
+    `/api/video-to-short/drive/inbox/${encodeURIComponent(fileId)}/thumbnail`
+  );
+}
+
+function DriveInboxThumbnail({ file }: { file: DriveInboxFile }) {
+  const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+    setLoaded(false);
+  }, [file.id, file.has_thumbnail, file.modified_at]);
+
+  const showImage = file.has_thumbnail !== false && !failed;
+
+  return (
+    <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-stone-100">
+      {showImage && !loaded ? (
+        <div
+          className="absolute inset-0 animate-pulse bg-stone-200"
+          aria-hidden
+        />
+      ) : null}
+      {showImage ? (
+        <img
+          src={driveThumbnailUrl(file.id)}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className={`h-full w-full object-cover ${loaded ? "opacity-100" : "opacity-0"}`}
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+        />
+      ) : null}
+      {!showImage ? (
+        <div
+          className="flex h-full w-full items-center justify-center text-stone-400"
+          aria-hidden
+        >
+          ▶
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function DriveClipPickerModal({
+  open,
+  onClose,
+  onAddClips,
+  disabled,
+}: Props) {
+  const [mode, setMode] = useState<PanelMode>("loading");
+  const [files, setFiles] = useState<DriveInboxFile[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+
+  const loadInbox = useCallback(async (isCancelled?: () => boolean) => {
+    setLoading(true);
+    setError(null);
+    let healthConfigured = false;
+    try {
+      const health = await fetch(clientApiPath("/api/video-to-short/health"), {
+        cache: "no-store",
+      });
+      if (health.status === 404) {
+        if (!isCancelled?.()) {
+          setMode("missing-api");
+          setFiles([]);
+        }
+        return;
+      }
+      if (health.ok) {
+        const h = (await health.json()) as { drive_inbox_configured?: boolean };
+        healthConfigured = Boolean(h.drive_inbox_configured);
+      }
+
+      if (isCancelled?.()) return;
+
+      const r = await fetch(clientApiPath("/api/video-to-short/drive/inbox"), {
+        cache: "no-store",
+      });
+      if (r.status === 404) {
+        if (!isCancelled?.()) {
+          setMode("missing-api");
+          setFiles([]);
+        }
+        return;
+      }
+      if (!r.ok) {
+        const text = await r.text();
+        if (!isCancelled?.()) {
+          setMode(healthConfigured ? "error" : "not-configured");
+          setError(`Drive inbox: ${text}`);
+          setFiles([]);
+        }
+        return;
+      }
+      const data = (await r.json()) as {
+        configured?: boolean;
+        files?: DriveInboxFile[];
+      };
+      if (isCancelled?.()) return;
+      const inboxConfigured = Boolean(data.configured);
+      const ready = inboxConfigured || healthConfigured;
+      setMode(ready ? "ready" : "not-configured");
+      setFiles(data.files ?? []);
+    } catch {
+      if (!isCancelled?.()) {
+        setMode("error");
+        setError("Could not load Google Drive inbox");
+        setFiles([]);
+      }
+    } finally {
+      if (!isCancelled?.()) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      setSelectedIds([]);
+      setError(null);
+      setProgress(null);
+      setMode("loading");
+      setFiles([]);
+      return;
+    }
+    let cancelled = false;
+    void loadInbox(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, loadInbox]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, busy, onClose]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const addSelectedClips = async () => {
+    if (selectedIds.length < 1) {
+      setError("Select at least one video");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const downloaded: File[] = [];
+    try {
+      for (let i = 0; i < selectedIds.length; i++) {
+        const id = selectedIds[i];
+        const meta = files.find((f) => f.id === id);
+        setProgress(
+          `Downloading ${i + 1} of ${selectedIds.length}${meta?.name ? `: ${meta.name}` : ""}…`
+        );
+        const r = await fetch(
+          clientApiPath(
+            `/api/video-to-short/drive/inbox/${encodeURIComponent(id)}/download`
+          ),
+          { cache: "no-store" }
+        );
+        if (!r.ok) {
+          setError(await r.text());
+          return;
+        }
+        const file = await blobToVideoFile(r, meta?.name ?? `drive_clip_${i + 1}.mp4`);
+        downloaded.push(file);
+      }
+      const added = onAddClips(downloaded);
+      if (added) {
+        onClose();
+      } else {
+        setError(
+          "Clips downloaded but were not added. Check file names/extensions (.mp4, .mov, …).",
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Drive download failed");
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="drive-clip-picker-title"
+    >
+      <button
+        type="button"
+        className="absolute inset-0 bg-stone-900/50"
+        aria-label="Close Google Drive picker"
+        disabled={busy}
+        onClick={() => {
+          if (!busy) onClose();
+        }}
+      />
+      <div className="relative z-10 flex max-h-[min(88vh,720px)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-xl">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-stone-200 px-4 py-3">
+          <h2
+            id="drive-clip-picker-title"
+            className="text-base font-semibold text-stone-900"
+          >
+            Google Drive
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg px-2 py-1 text-sm font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <p className="text-xs text-stone-600">
+            Pick one or more inbox videos. They are added as separate clips in
+            order — you can still add more from your device before stitching.
+          </p>
+
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => void loadInbox()}
+              disabled={loading || busy || disabled}
+              className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+            >
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+            {selectedIds.length > 0 ? (
+              <span className="text-xs text-stone-600">
+                {selectedIds.length} selected
+              </span>
+            ) : null}
+          </div>
+
+          {mode === "loading" ? (
+            <p className="mt-3 text-xs text-stone-500">Loading inbox…</p>
+          ) : null}
+
+          {mode === "missing-api" ? (
+            <p className="mt-3 text-xs text-amber-800">
+              Drive import is not deployed on this app yet. Redeploy with the
+              latest video-to-short proxy routes.
+            </p>
+          ) : null}
+
+          {mode === "not-configured" ? (
+            <p className="mt-3 text-xs text-stone-600">
+              Drive inbox is not configured on the Video to Short backend
+              (service account + shared folder).
+            </p>
+          ) : null}
+
+          {error ? (
+            <p className="mt-3 whitespace-pre-wrap text-xs text-red-700">{error}</p>
+          ) : null}
+
+          {progress ? (
+            <p className="mt-2 text-xs text-stone-600">{progress}</p>
+          ) : null}
+
+          {mode === "ready" ? (
+            files.length === 0 ? (
+              <p className="mt-3 text-xs text-stone-500">No videos in the inbox yet.</p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {files.map((f) => {
+                  const idx = selectedIds.indexOf(f.id);
+                  const selected = idx >= 0;
+                  return (
+                    <li
+                      key={f.id}
+                      className={`flex items-center gap-2 rounded-lg border px-2 py-2 text-xs ${
+                        selected
+                          ? "border-palette-teal bg-palette-pale/20"
+                          : "border-stone-200 bg-stone-50"
+                      }`}
+                    >
+                      <label className="flex shrink-0 cursor-pointer items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          disabled={busy || disabled}
+                          onChange={() => toggleSelect(f.id)}
+                        />
+                        {selected ? (
+                          <span className="font-bold text-palette-depth">
+                            {idx + 1}
+                          </span>
+                        ) : null}
+                      </label>
+                      <DriveInboxThumbnail file={f} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium text-stone-900">
+                          {f.name}
+                        </p>
+                        <p className="text-stone-500">
+                          {f.size_mb != null ? `${f.size_mb} MB` : "Unknown size"}
+                          {f.modified_at
+                            ? ` · ${new Date(f.modified_at).toLocaleString()}`
+                            : ""}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )
+          ) : null}
+
+          {mode === "error" && !files.length && error ? (
+            <p className="mt-3 whitespace-pre-wrap text-xs text-red-700">{error}</p>
+          ) : null}
+        </div>
+
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-stone-200 px-4 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="rounded-lg border border-stone-300 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={
+              busy ||
+              disabled ||
+              mode !== "ready" ||
+              selectedIds.length < 1
+            }
+            onClick={() => void addSelectedClips()}
+            className="rounded-lg bg-palette-moss px-4 py-1.5 text-xs font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
+          >
+            {busy
+              ? "Downloading…"
+              : selectedIds.length < 1
+                ? "Add clips"
+                : `Add ${selectedIds.length} clip${selectedIds.length === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
