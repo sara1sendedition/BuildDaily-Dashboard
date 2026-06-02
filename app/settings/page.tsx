@@ -28,11 +28,13 @@ import {
 } from "@/lib/default-first-comment";
 import {
   hubApi,
+  ccApi,
   type Brand,
   type AudiencePersona,
   type Product,
   type SocialConnection,
   type ReferenceSource,
+  type VoiceSettings,
 } from "@/lib/hub-api/settings-client";
 
 const STUDIO_CONNECTIONS_URL =
@@ -180,7 +182,7 @@ export default function SettingsPage() {
           <ConnectionsSection />
           <CopyDefaultsSection brand={brand} onChange={setBrand} />
           <ReferenceSourcesSection brandId={brand.id} />
-          <CommentConvertSection />
+          <CommentsSection />
         </div>
       ) : null}
     </main>
@@ -1022,21 +1024,114 @@ function ReferenceSourcesSection({ brandId }: { brandId: string }) {
 // Comment Convert — links out until Phase B wires it to /api/v1
 // ---------------------------------------------------------------------------
 
-function CommentConvertSection() {
+function CommentsSection() {
+  const [settings, setSettings] = useState<VoiceSettings | null>(null);
+  const [keywordsText, setKeywordsText] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    ccApi
+      .getVoiceSettings()
+      .then((s) => {
+        if (cancelled) return;
+        setSettings(s);
+        setKeywordsText((s.dmTriggerKeywords ?? []).join(", "));
+      })
+      .catch(() => {
+        if (!cancelled) setError("Couldn’t load your Comment Convert settings.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = useCallback(async (patch: Partial<VoiceSettings>) => {
+    setStatus("saving");
+    try {
+      const s = await ccApi.saveVoiceSettings(patch);
+      setSettings(s);
+      setKeywordsText((s.dmTriggerKeywords ?? []).join(", "));
+      setStatus("saved");
+      setTimeout(() => setStatus("idle"), 2000);
+    } catch {
+      setStatus("error");
+    }
+  }, []);
+
   return (
     <section className={cardClass}>
-      <h2 className="text-lg font-semibold text-stone-900">
-        Comment Convert settings
-      </h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-stone-900">Comments</h2>
+        <SaveStatus state={status} />
+      </div>
       <p className="mt-1 text-sm text-stone-600">
-        Your voice library and reply settings still live inside Comment Convert
-        for now. Your brand, offers, and audience above already feed its replies.
+        How Comment Convert handles your incoming comments and learns your reply
+        voice.
       </p>
-      <a
-        href={CC_SETTINGS_URL}
-        className={`${ghostBtn} mt-4 inline-block`}
-      >
-        Open Comment Convert settings →
+
+      {loading ? (
+        <p className="mt-4 text-sm text-stone-500">Loading…</p>
+      ) : error ? (
+        <p className="mt-4 text-sm text-red-700">
+          {error}{" "}
+          <a href={CC_SETTINGS_URL} className="font-medium underline">
+            Open Comment Convert →
+          </a>
+        </p>
+      ) : settings ? (
+        <div className="mt-5 space-y-5">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 rounded border-stone-300"
+              checked={settings.savePostedRepliesToVoiceLibrary}
+              onChange={(e) =>
+                save({ savePostedRepliesToVoiceLibrary: e.target.checked })
+              }
+            />
+            <span className="text-sm">
+              <span className="font-medium text-stone-800">
+                Save my posted replies to the voice library
+              </span>
+              <span className="mt-0.5 block text-xs text-stone-500">
+                When on, replies you publish are saved as voice samples so future
+                drafts sound more like you.
+              </span>
+            </span>
+          </label>
+
+          <Field
+            label="DM trigger keywords"
+            hint="Comma-separated. A comment that is only one of these words (e.g. “drill”) is treated as a DM trigger, not a real comment to reply to."
+          >
+            <input
+              className={inputClass}
+              value={keywordsText}
+              placeholder="drill, link, guide"
+              onChange={(e) => setKeywordsText(e.target.value)}
+              onBlur={() =>
+                save({
+                  dmTriggerKeywords: keywordsText
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                })
+              }
+            />
+          </Field>
+        </div>
+      ) : null}
+
+      <a href={CC_SETTINGS_URL} className={`${ghostBtn} mt-5 inline-block`}>
+        Open voice library in Comment Convert →
       </a>
     </section>
   );

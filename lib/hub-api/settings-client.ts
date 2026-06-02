@@ -161,3 +161,59 @@ export const hubApi = {
       body: JSON.stringify({ brandId, content, sourceLabel }),
     }),
 };
+
+// ---------------------------------------------------------------------------
+// Comment Convert (cc.builddaily.app) — cross-origin.
+//
+// CC is a different origin, so (like Studio→hub) its session cookie isn't sent
+// here. We forward the shared Clerk identity as a Bearer token. Clerk loads
+// async, so we wait briefly for the session before reading the token.
+// ---------------------------------------------------------------------------
+
+const CC_BASE =
+  process.env.NEXT_PUBLIC_CC_URL?.replace(/\/$/, "") ?? "https://cc.builddaily.app";
+
+export type VoiceSettings = {
+  savePostedRepliesToVoiceLibrary: boolean;
+  dmTriggerKeywords: string[];
+};
+
+async function ccAuthHeader(): Promise<Record<string, string>> {
+  if (typeof window === "undefined") return {};
+  try {
+    const w = window as {
+      Clerk?: { session?: { getToken: () => Promise<string | null> } | null };
+    };
+    for (let i = 0; i < 50 && !(w.Clerk && w.Clerk.session); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const token = await w.Clerk?.session?.getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+async function ccReq<T>(path: string, init?: RequestInit): Promise<T> {
+  const auth = await ccAuthHeader();
+  const res = await fetch(`${CC_BASE}${path}`, {
+    credentials: "include",
+    ...init,
+    headers: {
+      ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
+      ...auth,
+      ...(init?.headers ?? {}),
+    },
+  });
+  if (!res.ok) throw new Error(`Comment Convert request failed (${res.status})`);
+  return (await res.json()) as T;
+}
+
+export const ccApi = {
+  getVoiceSettings: () => ccReq<VoiceSettings>("/api/voice/settings"),
+  saveVoiceSettings: (patch: Partial<VoiceSettings>) =>
+    ccReq<VoiceSettings>("/api/voice/settings", {
+      method: "POST",
+      body: JSON.stringify(patch),
+    }),
+};
