@@ -55,6 +55,10 @@ export const POST = withUser(async ({ req, user }) => {
       body.videoStyleDefaults == null
         ? Prisma.DbNull
         : (body.videoStyleDefaults as Prisma.InputJsonValue),
+    teleprompterSettings:
+      body.teleprompterSettings == null
+        ? Prisma.DbNull
+        : (body.teleprompterSettings as Prisma.InputJsonValue),
     videoOrientation:
       str(body.videoOrientation) === "vertical" ||
       str(body.videoOrientation) === "horizontal"

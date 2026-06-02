@@ -300,6 +300,7 @@ model Project {
   segmentPrompts     Json     @default("[]") @map("segment_prompts")
   quickPlanSchedule  Json?    @map("quick_plan_schedule")
   videoStyleDefaults Json?    @map("video_style_defaults")
+  teleprompterSettings Json?  @map("teleprompter_settings") // Studio per-project teleprompter prefs
   videoOrientation   String?  @map("video_orientation") // 'vertical' | 'horizontal'
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz
@@ -347,6 +348,7 @@ model BrollClip {
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   storageProvider String   @default("bunny-stream") @map("storage_provider")
   storagePath     String   @map("storage_path") // Bunny Stream video_id, or legacy supabase path during transition
+  url             String?  // Playable URL Studio uses directly (Bunny playback or legacy Supabase public URL)
   durationSeconds Decimal  @map("duration_seconds") @db.Decimal
   tags            String[] @default([])
   name            String?

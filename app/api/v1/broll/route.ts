@@ -43,6 +43,7 @@ export const POST = withUser(async ({ req, user }) => {
   const data = {
     storageProvider: str(body.storageProvider) ?? "bunny-stream",
     storagePath,
+    url: str(body.url) ?? null,
     durationSeconds: durationRaw,
     tags: optStrArr(body.tags) ?? [],
     name: str(body.name) ?? null,
