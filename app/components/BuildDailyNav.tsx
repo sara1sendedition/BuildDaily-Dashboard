@@ -4,22 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { storytrackPublicUrl, commentInboxPublicUrl } from "@/lib/hub/env";
 
-const internalLinks = [
-  { href: "/", label: "Hub", match: (p: string) => p === "/" },
-  { href: "/stitch", label: "Clip Stitch", match: (p: string) => p.startsWith("/stitch") },
-  {
-    href: "/multiplier",
-    label: "Multiplier",
-    match: (p: string) =>
-      p.startsWith("/multiplier") ||
-      p.startsWith("/refine") ||
-      p.startsWith("/image-post") ||
-      p.startsWith("/style-carousel"),
-  },
-  { href: "/schedule", label: "Calendar", match: (p: string) => p.startsWith("/schedule") },
-  { href: "/settings", label: "Settings", match: (p: string) => p.startsWith("/settings") },
-] as const;
-
 function navClass(active: boolean): string {
   return active
     ? "text-[var(--bd-green-800)] font-semibold"
@@ -31,6 +15,15 @@ export function BuildDailyNav() {
   const storytrackUrl = storytrackPublicUrl();
   const inboxUrl = commentInboxPublicUrl();
 
+  // "Video Tools" groups Studio / Stitch / Multiplier; it reads active whenever
+  // the current page is one of the Multiplier/Stitch surfaces.
+  const videoToolsActive =
+    pathname.startsWith("/stitch") ||
+    pathname.startsWith("/multiplier") ||
+    pathname.startsWith("/refine") ||
+    pathname.startsWith("/image-post") ||
+    pathname.startsWith("/style-carousel");
+
   return (
     <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
       <Link
@@ -39,31 +32,79 @@ export function BuildDailyNav() {
       >
         BuildDaily
       </Link>
-      {internalLinks.map((item) => (
-        <Link
-          key={item.href}
-          href={item.href}
-          className={navClass(item.match(pathname))}
+
+      {/* Video Tools — hover dropdown (Studio / Stitch / Multiplier). The pt-2
+          on the panel bridges the gap so the menu stays open while the cursor
+          moves from the trigger to the items. */}
+      <div className="relative group">
+        <button
+          type="button"
+          className={`inline-flex items-center gap-1 ${navClass(videoToolsActive)}`}
+          aria-haspopup="true"
         >
-          {item.label}
-        </Link>
-      ))}
-      <a
-        href={storytrackUrl}
-        className={navClass(false)}
-        rel="noopener noreferrer"
-      >
-        Video Studio
-      </a>
+          Video Tools
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden="true"
+          >
+            <path d="M5 8l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <div className="absolute left-0 top-full z-50 hidden pt-2 group-hover:block">
+          <div className="min-w-[150px] rounded-lg border border-[var(--bd-line)] bg-[var(--bd-paper)] py-1 shadow-lg">
+            <a
+              href={storytrackUrl}
+              className="block px-3 py-1.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+              rel="noopener noreferrer"
+            >
+              Studio
+            </a>
+            <Link
+              href="/stitch"
+              className="block px-3 py-1.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+            >
+              Stitch
+            </Link>
+            <Link
+              href="/multiplier"
+              className="block px-3 py-1.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+            >
+              Multiplier
+            </Link>
+          </div>
+        </div>
+      </div>
+
       {inboxUrl ? (
         <a href={inboxUrl} className={navClass(false)} rel="noopener noreferrer">
-          Comment Converter
+          Community
         </a>
       ) : (
-        <span className="text-stone-400" title="Set NEXT_PUBLIC_COMMENT_INBOX_URL">
-          Comment Converter
+        <span
+          className="text-stone-400"
+          title="Set NEXT_PUBLIC_COMMENT_INBOX_URL"
+        >
+          Community
         </span>
       )}
+
+      <Link
+        href="/schedule"
+        className={navClass(pathname.startsWith("/schedule"))}
+      >
+        Calendar
+      </Link>
+      <Link
+        href="/settings"
+        className={navClass(pathname.startsWith("/settings"))}
+      >
+        Settings
+      </Link>
     </nav>
   );
 }
