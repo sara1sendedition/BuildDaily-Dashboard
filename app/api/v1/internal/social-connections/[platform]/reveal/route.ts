@@ -25,7 +25,7 @@ export const runtime = "nodejs";
  */
 export async function POST(
   request: Request,
-  ctx: { params: Promise<{ platform: string }> } | { params: { platform: string } },
+  { params }: { params: Promise<{ platform: string }> },
 ) {
   const deny = denyIfNotInternalAuthorized(request);
   if (deny) return deny;
@@ -37,12 +37,7 @@ export async function POST(
     );
   }
 
-  const rawParams = (ctx as { params: unknown }).params;
-  const params =
-    typeof (rawParams as Promise<unknown>)?.then === "function"
-      ? await (rawParams as Promise<{ platform: string }>)
-      : (rawParams as { platform: string });
-  const platform = params.platform;
+  const { platform } = await params;
 
   let body: { userId?: string };
   try {
