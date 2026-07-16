@@ -1,21 +1,24 @@
 /**
  * Tiny IndexedDB helper that lets the /stitch page hand a stitched MP4 to
- * the home page across a route change. We can't pass a File via URL, and
- * sessionStorage caps at ~5 MB which won't fit a video. IndexedDB handles
- * Blob storage natively and persists across navigations.
+ * Multiplier or Video Editor across a route change. We can't pass a File via
+ * URL, and sessionStorage caps at ~5 MB which won't fit a video. IndexedDB
+ * handles Blob storage natively and persists across navigations.
  *
  * Original v1 design used `consumeStitchedFile` (read+delete in one tx). That
  * was fragile on mobile: if the home page failed to fully kick off processing
  * (network blip, tab suspended mid-fetch, JS error), the file was gone with
  * no retry path. v2 splits this into `peekStitchedFile` (read only) and
- * `clearStitchedFile` (explicit delete). The home page peeks on mount and
- * clears only after the queue item lands in a terminal success state.
+ * `clearStitchedFile` (explicit delete). The destination page peeks on mount
+ * and clears only after the queue item lands in a terminal success state.
  */
 
 const DB_NAME = "stitch-handoff";
 const DB_VERSION = 1;
 const STORE = "files";
 const KEY = "pending";
+
+/** Where stitch should send the finished MP4(s). */
+export type StitchHandoffDestination = "multiplier" | "video-editor";
 
 type StashedFile = {
   blob: Blob;
@@ -28,6 +31,7 @@ type StashedFile = {
 type StashedBatch = {
   entries: StashedFile[];
   createdAt: number;
+  destination?: StitchHandoffDestination;
 };
 
 export type PeekedStitchedFile = {
@@ -41,6 +45,8 @@ export type PeekedStitchedFiles = {
   aiInstructionsByFile: Array<string | undefined>;
   /** ms-since-epoch when this batch was stashed; useful to dedupe on refresh. */
   createdAt: number;
+  /** Target tool; older stashes without this default to Multiplier. */
+  destination: StitchHandoffDestination;
 };
 
 function openDb(): Promise<IDBDatabase> {
@@ -61,8 +67,15 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
+function normalizeDestination(
+  value: unknown
+): StitchHandoffDestination {
+  return value === "video-editor" ? "video-editor" : "multiplier";
+}
+
 export async function stashStitchedFiles(
-  files: Array<{ blob: Blob; name?: string; aiInstructions?: string }>
+  files: Array<{ blob: Blob; name?: string; aiInstructions?: string }>,
+  destination: StitchHandoffDestination = "multiplier"
 ): Promise<void> {
   const valid = files.filter((f) => f.blob && f.blob.size > 0);
   if (valid.length === 0) return;
@@ -84,6 +97,7 @@ export async function stashStitchedFiles(
     const value: StashedBatch = {
       entries,
       createdAt: now,
+      destination,
     };
     const req = store.put(value, KEY);
     req.onsuccess = () => resolve();
@@ -94,9 +108,10 @@ export async function stashStitchedFiles(
 
 export async function stashStitchedFile(
   blob: Blob,
-  name = "stitched.mp4"
+  name = "stitched.mp4",
+  destination: StitchHandoffDestination = "multiplier"
 ): Promise<void> {
-  await stashStitchedFiles([{ blob, name }]);
+  await stashStitchedFiles([{ blob, name }], destination);
 }
 
 /**
@@ -132,9 +147,11 @@ export async function peekStitchedFiles(): Promise<PeekedStitchedFiles | null> {
 
   let entries: StashedFile[];
   let createdAt: number;
+  let destination: StitchHandoffDestination = "multiplier";
   if (isBatch(value)) {
     entries = value.entries;
     createdAt = value.createdAt;
+    destination = normalizeDestination(value.destination);
   } else {
     // Backward compatibility with v1 single-file record shape.
     const single = value as StashedFile;
@@ -163,7 +180,7 @@ export async function peekStitchedFiles(): Promise<PeekedStitchedFiles | null> {
   }
 
   if (files.length === 0) return null;
-  return { files, aiInstructionsByFile, createdAt };
+  return { files, aiInstructionsByFile, createdAt, destination };
 }
 
 export async function peekStitchedFile(): Promise<PeekedStitchedFile | null> {

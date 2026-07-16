@@ -11,7 +11,7 @@ import { SocialMicroPanel } from "@/app/components/SocialMicroPanel";
 import { RefinePanel } from "@/app/components/RefinePanel";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
 import { FrameColorAdjustSliders } from "@/app/components/FrameColorAdjustSliders";
-import { useCarouselWorkspace, type VideoQueueItem } from "@/context/carousel-workspace-context";
+import { useCarouselWorkspace } from "@/context/carousel-workspace-context";
 import { useScheduleStore } from "@/context/schedule-context";
 import { QueueItemEditableTitle } from "@/app/components/QueueItemEditableTitle";
 import { clientApiPath } from "@/lib/client-api-path";
@@ -32,6 +32,17 @@ import { X_THREADS_OUTPUT_ENABLED } from "@/lib/studio-output-flags";
 import { DriveInboxPanel } from "@/app/components/DriveInboxPanel";
 import { peekStitchedFiles, clearStitchedFile } from "@/lib/stitch-handoff";
 import {
+  readStitchEnqueuedCreatedAt,
+  readStitchHandoffQueueIds,
+  claimStitchEnqueue,
+  releaseStitchEnqueueClaimIfStillClaiming,
+  stitchHandoffShouldSkipReenqueue,
+  removeRetryableHandoffRows,
+  stitchHandoffBatchFullyDone,
+  stitchHandoffRetryFileIndexes,
+  mergeStitchHandoffQueueIds,
+} from "@/lib/stitch-handoff-consume";
+import {
   readInFlightShortJob,
   clearInFlightShortJob,
   readPreUploadCorrelation,
@@ -42,6 +53,7 @@ import {
 } from "@/lib/run-video-to-short";
 import { normalizeShortEditorialCuts } from "@/lib/normalize-short-editorial-cuts";
 import { queueItemDisplayLabel } from "@/lib/queue-display-label";
+import { setShortSourceTool } from "@/lib/short-source-tool";
 import { isMobileClient } from "@/lib/mobile-client";
 
 type StudioTab = "carousel" | "image" | "social" | "short";
@@ -93,6 +105,7 @@ export default function Home() {
     reprocessActiveShortOutput,
     studioOutputs,
     setStudioOutputs,
+    hubQueueHydrationDone,
   } = useCarouselWorkspace();
 
   const activeQueueItem = queue.find((q) => q.id === activeQueueId);
@@ -277,70 +290,99 @@ export default function Home() {
   // record once a queue item reaches "completed". On failure we leave
   // the file so the user can refresh and retry.
   const [stitchedHandoffActive, setStitchedHandoffActive] = useState(false);
+  const [handoffQueueIds, setHandoffQueueIds] = useState<string[]>([]);
   useEffect(() => {
+    if (!hubQueueHydrationDone) return;
     let cancelled = false;
+    let claimedCreatedAt: number | null = null;
     (async () => {
       const peeked = await peekStitchedFiles();
       if (!peeked || cancelled) return;
-      const sessionKey = "stitch:enqueuedCreatedAt";
-      let alreadyEnqueued = "";
-      try {
-        alreadyEnqueued = window.sessionStorage.getItem(sessionKey) ?? "";
-      } catch {
-        /* ignore — session storage may be unavailable */
+      // Stitch may target Video Editor instead of Multiplier.
+      if (peeked.destination === "video-editor") return;
+      const alreadyEnqueued =
+        readStitchEnqueuedCreatedAt() === String(peeked.createdAt);
+      if (
+        alreadyEnqueued &&
+        stitchHandoffShouldSkipReenqueue(
+          queue,
+          peeked.createdAt,
+          hubQueueHydrationDone
+        )
+      ) {
+        setHandoffQueueIds(readStitchHandoffQueueIds(peeked.createdAt));
+        setStitchedHandoffActive(true);
+        return;
       }
-      const hasLiveWork = queue.some(
-        (q) =>
-          (q.status === "pending" || q.status === "processing") &&
-          q.file.size > 0
-      );
-      const handoffAlreadyConsumed = queue.some(
-        (q) => q.status === "done" && q.file.size > 0
-      );
-      if (alreadyEnqueued === String(peeked.createdAt)) {
-        if (hasLiveWork || handoffAlreadyConsumed) {
-          // Active run in progress, or batch already finished — do not re-enqueue.
+      const retryIndexes = alreadyEnqueued
+        ? stitchHandoffRetryFileIndexes(queue, peeked.createdAt)
+        : null;
+      if (retryIndexes && retryIndexes.length === 0) {
+        setHandoffQueueIds(readStitchHandoffQueueIds(peeked.createdAt));
+        setStitchedHandoffActive(true);
+        return;
+      }
+      if (alreadyEnqueued) {
+        removeRetryableHandoffRows(queue, peeked.createdAt, removeQueueItem);
+        if (!claimStitchEnqueue(peeked.createdAt, { allowRetry: true })) {
+          setHandoffQueueIds(readStitchHandoffQueueIds(peeked.createdAt));
           setStitchedHandoffActive(true);
           return;
         }
-        // Page refreshed mid-run: session says enqueued but no live File in memory.
-        for (const item of queue) {
-          const interruptedStub =
-            item.file.size === 0 &&
-            (item.status === "processing" ||
-              (item.status === "error" &&
-                item.error?.includes("Processing was interrupted")));
-          if (interruptedStub) {
-            removeQueueItem(item.id);
-          }
-        }
+      } else if (!claimStitchEnqueue(peeked.createdAt)) {
+        setHandoffQueueIds(readStitchHandoffQueueIds(peeked.createdAt));
+        setStitchedHandoffActive(true);
+        return;
       }
-      try {
-        window.sessionStorage.setItem(sessionKey, String(peeked.createdAt));
-      } catch {
-        /* ignore */
+      claimedCreatedAt = peeked.createdAt;
+      if (cancelled) {
+        releaseStitchEnqueueClaimIfStillClaiming(peeked.createdAt);
+        return;
       }
-      enqueueFiles(peeked.files, {
-        aiInstructionsByIndex: peeked.aiInstructionsByFile,
+      const filesToEnqueue =
+        retryIndexes === null
+          ? peeked.files
+          : retryIndexes.map((i) => peeked.files[i]!).filter(Boolean);
+      const notes =
+        retryIndexes === null
+          ? peeked.aiInstructionsByFile
+          : retryIndexes.map((i) => peeked.aiInstructionsByFile[i]);
+      const newIds = enqueueFiles(filesToEnqueue, {
+        aiInstructionsByIndex: notes,
       });
+      setShortSourceTool("multiplier");
+      const mergedIds = mergeStitchHandoffQueueIds(
+        peeked.createdAt,
+        peeked.files.length,
+        retryIndexes,
+        newIds
+      );
+      if (mergedIds.length === 0) {
+        releaseStitchEnqueueClaimIfStillClaiming(peeked.createdAt);
+        claimedCreatedAt = null;
+        return;
+      }
+      claimedCreatedAt = null;
+      if (cancelled) return;
+      setHandoffQueueIds(mergedIds);
       setStitchedHandoffActive(true);
     })();
     return () => {
       cancelled = true;
+      if (claimedCreatedAt != null) {
+        releaseStitchEnqueueClaimIfStillClaiming(claimedCreatedAt);
+      }
     };
-  }, [enqueueFiles, queue, removeQueueItem]);
+  }, [enqueueFiles, queue, removeQueueItem, hubQueueHydrationDone]);
 
-  // Once a queue item reaches a terminal success state and we know it came
-  // from the stitched-file handoff, clear the IDB stash. Failures keep the
-  // file so the user can refresh and retry without re-uploading.
+  // Clear IndexedDB only after every handoff queue row reaches "done".
   useEffect(() => {
-    if (!stitchedHandoffActive || queue.length === 0) return;
-    const last = queue[queue.length - 1] as VideoQueueItem;
-    if (last.status === "done") {
-      void clearStitchedFile();
-      setStitchedHandoffActive(false);
-    }
-  }, [queue, stitchedHandoffActive]);
+    if (!stitchedHandoffActive) return;
+    if (!stitchHandoffBatchFullyDone(queue, handoffQueueIds)) return;
+    void clearStitchedFile();
+    setStitchedHandoffActive(false);
+    setHandoffQueueIds([]);
+  }, [queue, stitchedHandoffActive, handoffQueueIds]);
 
   // Mobile-resilient Short job recovery. If the tab was suspended/refreshed
   // while a Short was in flight, the backend likely still finished the job —
@@ -1121,7 +1163,10 @@ export default function Home() {
           </details>
 
           <DriveInboxPanel
-            onEnqueueFiles={(files) => enqueueFiles(files)}
+            onEnqueueFiles={(files) => {
+              setShortSourceTool("multiplier");
+              enqueueFiles(files);
+            }}
             disabled={queue.some((q) => q.status === "processing")}
           />
 
@@ -1138,6 +1183,7 @@ export default function Home() {
               onChange={(e) => {
                 const list = e.target.files;
                 if (list?.length) {
+                  setShortSourceTool("multiplier");
                   enqueueFiles(Array.from(list));
                 }
                 e.target.value = "";

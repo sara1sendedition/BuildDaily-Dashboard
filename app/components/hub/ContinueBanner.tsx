@@ -4,6 +4,8 @@ import Link from "next/link";
 import type { HubClientStatus } from "@/lib/hub/types";
 import { commentInboxPublicUrl } from "@/lib/hub/env";
 
+import { getShortSourceTool } from "@/lib/short-source-tool";
+
 export type ContinueItem = {
   title: string;
   description: string;
@@ -16,17 +18,23 @@ export function pickContinueItem(
   commentReplies?: number
 ): ContinueItem | null {
   if (client.clipStitchHandoffReady) {
+    const toEditor = client.clipStitchHandoffDestination === "video-editor";
     return {
       title: "Combined clip ready",
-      description: "Open Multiplier to turn your stitched video into posts.",
-      href: "/multiplier",
+      description: toEditor
+        ? "Open Video Editor to turn your stitched video into a short."
+        : "Open Multiplier to turn your stitched video into posts.",
+      href: toEditor ? "/video-editor" : "/multiplier",
     };
   }
   if (client.shortProcessing) {
+    const fromEditor = getShortSourceTool() === "video-editor";
     return {
       title: "Short video processing",
-      description: "Your reel is still rendering — open Multiplier to check progress.",
-      href: "/multiplier?tab=short",
+      description: fromEditor
+        ? "Your reel is still rendering — open Video Editor to check progress."
+        : "Your reel is still rendering — open Multiplier to check progress.",
+      href: fromEditor ? "/video-editor" : "/multiplier",
     };
   }
   if (client.nextPublishAtUnix) {

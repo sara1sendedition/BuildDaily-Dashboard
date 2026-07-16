@@ -24,9 +24,15 @@ function readInFlightShort(): boolean {
 
 export async function readHubClientStatus(): Promise<HubClientStatus> {
   let clipStitchHandoffReady = false;
+  let clipStitchHandoffDestination:
+    | HubClientStatus["clipStitchHandoffDestination"]
+    | undefined;
   try {
     const peeked = await peekStitchedFiles();
     clipStitchHandoffReady = peeked !== null && peeked.files.length > 0;
+    if (peeked) {
+      clipStitchHandoffDestination = peeked.destination;
+    }
   } catch {
     clipStitchHandoffReady = false;
   }
@@ -36,6 +42,7 @@ export async function readHubClientStatus(): Promise<HubClientStatus> {
 
   return {
     clipStitchHandoffReady,
+    clipStitchHandoffDestination,
     shortProcessing,
     shortReady: false,
     postsScheduledUpcoming: countUpcomingScheduled(nowUnix),

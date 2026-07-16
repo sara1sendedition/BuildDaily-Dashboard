@@ -290,6 +290,14 @@ const DEFAULT_STUDIO_OUTPUTS: StudioOutputToggles = {
   reelShort: true,
 };
 
+/** Video Editor / short-only runs — no carousel, image post, or X/Threads. */
+export const SHORT_ONLY_STUDIO_OUTPUTS: StudioOutputToggles = {
+  carousel: false,
+  imagePost: false,
+  xPost: false,
+  reelShort: true,
+};
+
 export type VideoQueueItem = {
   id: string;
   /**
@@ -302,6 +310,11 @@ export type VideoQueueItem = {
   displayLabel?: string;
   /** Optional per-video run notes for AI (stitch handoff or custom enqueue). */
   aiInstructions?: string;
+  /**
+   * Optional per-item output overrides (e.g. Video Editor short-only). When set,
+   * the queue loop uses these instead of the global Multiplier toggles.
+   */
+  studioOutputs?: StudioOutputToggles;
   status: "pending" | "processing" | "done" | "error";
   error?: string;
   /** Latest Video to Short / pipeline step message while processing. */
@@ -400,8 +413,12 @@ type CarouselWorkspaceValue = {
   renameQueueItem: (id: string, displayLabel: string) => void;
   enqueueFiles: (
     files: File[],
-    opts?: { aiInstructionsByIndex?: Array<string | undefined> }
-  ) => void;
+    opts?: {
+      aiInstructionsByIndex?: Array<string | undefined>;
+      /** Override Multiplier toggles for this batch (e.g. short-only Video Editor). */
+      studioOutputs?: StudioOutputToggles;
+    }
+  ) => string[];
   file: File | null;
   /** Short pipeline output for the active queue row, if any (not used for carousel/image). */
   shortOutputFile: File | null;
@@ -494,6 +511,12 @@ type CarouselWorkspaceValue = {
   /** Which outputs to generate for new uploads and for “Regenerate” (Short only applies on upload). */
   studioOutputs: StudioOutputToggles;
   setStudioOutputs: Dispatch<SetStateAction<StudioOutputToggles>>;
+  /**
+   * True after the one-shot Hub queue hydration attempt finishes (success,
+   * empty list, or failure). Stitch handoff consumers wait on this so they
+   * do not re-enqueue while hydrated stubs are still loading.
+   */
+  hubQueueHydrationDone: boolean;
   /**
    * Phase 3.B — fetch a hydrated queue item's source video from Bunny and
    * replace its stub File with a real one. Returns the upgraded File on
@@ -1232,6 +1255,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const [studioOutputs, setStudioOutputs] =
     useState<StudioOutputToggles>(DEFAULT_STUDIO_OUTPUTS);
   const studioOutputsRef = useRef<StudioOutputToggles>(DEFAULT_STUDIO_OUTPUTS);
+  const [hubQueueHydrationDone, setHubQueueHydrationDone] = useState(false);
 
   useEffect(() => {
     studioOutputsRef.current = studioOutputs;
@@ -1561,6 +1585,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       label: queueItemScheduleLabel(q),
       displayLabel: q.displayLabel ?? null,
       short: Boolean(q.shortOutputFile) || Boolean(q.shortJobId),
+      studioOutputs: q.studioOutputs ?? null,
       payload: buildHubPayload(snap, q),
     });
   }
@@ -1645,15 +1670,33 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   function buildHubPayload(
     snap: QueueCarouselSnapshot | undefined,
-    q?: Pick<VideoQueueItem, "shortJobId">
+    q?: Pick<VideoQueueItem, "shortJobId" | "studioOutputs">
   ): MultiplierQueuePayload {
+    const studioOutputs =
+      q?.studioOutputs &&
+      typeof q.studioOutputs.carousel === "boolean" &&
+      typeof q.studioOutputs.imagePost === "boolean" &&
+      typeof q.studioOutputs.xPost === "boolean" &&
+      typeof q.studioOutputs.reelShort === "boolean"
+        ? {
+            carousel: q.studioOutputs.carousel,
+            imagePost: q.studioOutputs.imagePost,
+            xPost: q.studioOutputs.xPost,
+            reelShort: q.studioOutputs.reelShort,
+          }
+        : undefined;
     if (!snap) {
-      return q?.shortJobId ? { v: 1, shortJobId: q.shortJobId } : { v: 1 };
+      return {
+        v: 1,
+        ...(q?.shortJobId ? { shortJobId: q.shortJobId } : {}),
+        ...(studioOutputs ? { studioOutputs } : {}),
+      };
     }
     return {
       v: 1,
       ...(snap.bunnyUrls ? { bunnyUrls: snap.bunnyUrls } : {}),
       ...(q?.shortJobId ? { shortJobId: q.shortJobId } : {}),
+      ...(studioOutputs ? { studioOutputs } : {}),
       ...(snap.socialCaption ? { socialCaption: snap.socialCaption } : {}),
       ...(() => {
         const copy = imagePostCopyFromSnapshot(snap.imagePost);
@@ -1711,6 +1754,19 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           typeof payload.shortJobId === "string" && payload.shortJobId.trim()
             ? payload.shortJobId.trim()
             : undefined;
+        const payloadStudioOutputs =
+          payload.studioOutputs &&
+          typeof payload.studioOutputs.carousel === "boolean" &&
+          typeof payload.studioOutputs.imagePost === "boolean" &&
+          typeof payload.studioOutputs.xPost === "boolean" &&
+          typeof payload.studioOutputs.reelShort === "boolean"
+            ? {
+                carousel: payload.studioOutputs.carousel,
+                imagePost: payload.studioOutputs.imagePost,
+                xPost: payload.studioOutputs.xPost,
+                reelShort: payload.studioOutputs.reelShort,
+              }
+            : undefined;
         newQueueRows.push({
           id: item.id,
           file: stubFile,
@@ -1719,6 +1775,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
               ? "error"
               : item.status,
           ...(payloadShortJobId ? { shortJobId: payloadShortJobId } : {}),
+          ...(payloadStudioOutputs
+            ? { studioOutputs: payloadStudioOutputs }
+            : {}),
           ...(interruptedProcessing
             ? {
                 error:
@@ -1795,9 +1854,13 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         queueResultsRef.current = next;
         return next;
       });
-    })().catch((e) => {
-      console.warn("[multiplier-queue] Hub hydration crashed:", e);
-    });
+    })()
+      .catch((e) => {
+        console.warn("[multiplier-queue] Hub hydration crashed:", e);
+      })
+      .finally(() => {
+        if (!cancelled) setHubQueueHydrationDone(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -2256,7 +2319,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         const pending = queueRef.current.find((q) => q.status === "pending");
         if (!pending) break;
 
-        const formats = withEffectiveStudioOutputs(studioOutputsRef.current);
+        const formats = withEffectiveStudioOutputs(
+          pending.studioOutputs ?? studioOutputsRef.current
+        );
         const needsTranscript =
           formats.carousel || formats.imagePost || formats.xPost;
         const mobileSequential = isMobileClient();
@@ -2677,8 +2742,11 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const enqueueFiles = useCallback(
     (
       files: File[],
-      opts?: { aiInstructionsByIndex?: Array<string | undefined> }
-    ) => {
+      opts?: {
+        aiInstructionsByIndex?: Array<string | undefined>;
+        studioOutputs?: StudioOutputToggles;
+      }
+    ): string[] => {
       const list = files.filter(isLikelyVideoFile);
       if (list.length === 0) {
         if (files.length > 0) {
@@ -2686,15 +2754,18 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             "None of the selected files look like supported videos (e.g. .mp4, .mov, .webm). If this is a video, try renaming with a standard extension or export as MP4."
           );
         }
-        return;
+        return [];
       }
-      const o = withEffectiveStudioOutputs(studioOutputsRef.current);
+      const o = withEffectiveStudioOutputs(
+        opts?.studioOutputs ?? studioOutputsRef.current
+      );
       if (!o.carousel && !o.imagePost && !o.xPost && !o.reelShort) {
         setError("Choose at least one output format before uploading.");
-        return;
+        return [];
       }
       setError(null);
       const notesByIndex = opts?.aiInstructionsByIndex ?? [];
+      const itemOutputs = opts?.studioOutputs;
       const newItems: VideoQueueItem[] = list.map((f, idx) => ({
         id: crypto.randomUUID(),
         file: f,
@@ -2702,6 +2773,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           typeof notesByIndex[idx] === "string"
             ? notesByIndex[idx]!.trim().slice(0, MAX_CAROUSEL_FOCUS_CHARS)
             : undefined,
+        ...(itemOutputs ? { studioOutputs: itemOutputs } : {}),
         status: "pending" as const,
       }));
       // Update ref synchronously before processQueueLoop  -  React may apply
@@ -2713,6 +2785,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       // (prev ?? newId kept the old selection and felt like "nothing happened").
       selectQueueItem(newItems[0]!.id);
       void processQueueLoop();
+      return newItems.map((item) => item.id);
     },
     [processQueueLoop, selectQueueItem, setError]
   );
@@ -3951,6 +4024,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       processTiming,
       studioOutputs,
       setStudioOutputs,
+      hubQueueHydrationDone,
       rehydrateSourceVideoFile,
     }),
     [
@@ -4022,6 +4096,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       processTiming,
       studioOutputs,
       setStudioOutputs,
+      hubQueueHydrationDone,
       rehydrateSourceVideoFile,
     ]
   );

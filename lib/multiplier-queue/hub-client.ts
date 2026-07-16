@@ -56,6 +56,13 @@ export type MultiplierQueuePayload = {
   carouselOverride?: string;
   /** Video to Short job id — survives Hub sync for re-process / re-download after refresh. */
   shortJobId?: string;
+  /** Per-item output toggles (e.g. Video Editor short-only). */
+  studioOutputs?: {
+    carousel: boolean;
+    imagePost: boolean;
+    xPost: boolean;
+    reelShort: boolean;
+  };
 };
 
 /** Wire shape of an item as returned by the Hub. */

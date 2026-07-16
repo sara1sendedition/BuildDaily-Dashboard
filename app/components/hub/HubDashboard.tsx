@@ -155,11 +155,20 @@ export function HubDashboard() {
       {
         title: "Clip Stitch",
         subtitle:
-          "Already have multiple video files? Combine them, then open Multiplier.",
+          "Already have multiple video files? Combine them, then open Multiplier or Video Editor.",
         statLine: stitchStat,
         nudge: "Combine your takes in one click",
         href: "/stitch",
         cta: "Combine clips",
+      },
+      {
+        title: "Video Editor",
+        subtitle:
+          "Upload or stitch a video into a captioned short — without multiplying into other formats.",
+        statLine: "Short only",
+        nudge: "Edit a reel without the full multiply set",
+        href: "/video-editor",
+        cta: "Open Video Editor",
       },
       {
         title: "Multiplier",

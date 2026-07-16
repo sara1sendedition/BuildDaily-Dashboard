@@ -56,6 +56,11 @@ export type StitchBatchState = {
   /** ms-since-epoch when the batch was created (used for TTL + "from <time>"). */
   createdAt: number;
   rows: StitchRowState[];
+  /**
+   * Where to send finished MP4s after stitch/resume. Persisted so a reload
+   * does not silently reset Video Editor → Multiplier.
+   */
+  destination?: "multiplier" | "video-editor";
 };
 
 function safeLocalStorage(): Storage | null {
@@ -119,7 +124,13 @@ export function readStitchBatch(): StitchBatchState | null {
       rows.push(r as StitchRowState);
     }
   }
-  return { batchId: parsed.batchId, createdAt: parsed.createdAt, rows };
+  return {
+    batchId: parsed.batchId,
+    createdAt: parsed.createdAt,
+    rows,
+    destination:
+      parsed.destination === "video-editor" ? "video-editor" : "multiplier",
+  };
 }
 
 export function writeStitchBatch(state: StitchBatchState): void {

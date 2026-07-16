@@ -14,8 +14,16 @@ const PATHS = [
     steps: ["stitch", "multiplier", "schedule"] as const,
   },
   {
+    label: "Raw clips → stitch → short only",
+    steps: ["stitch", "video-editor", "schedule"] as const,
+  },
+  {
     label: "Video ready → multiply",
     steps: ["multiplier", "schedule"] as const,
+  },
+  {
+    label: "Video ready → short only",
+    steps: ["video-editor", "schedule"] as const,
   },
   {
     label: "Comments only",
@@ -23,7 +31,9 @@ const PATHS = [
   },
 ];
 
-function stepHref(step: (typeof PATHS)[number]["steps"][number]): string {
+function stepHref(
+  step: (typeof PATHS)[number]["steps"][number]
+): string {
   switch (step) {
     case "storytrack":
       return storytrackPublicUrl();
@@ -31,6 +41,8 @@ function stepHref(step: (typeof PATHS)[number]["steps"][number]): string {
       return "/stitch";
     case "multiplier":
       return "/multiplier";
+    case "video-editor":
+      return "/video-editor";
     case "schedule":
       return "/schedule";
     case "inbox":
@@ -82,7 +94,9 @@ export function CommonPaths() {
                           ? "Clip Stitch"
                           : step === "multiplier"
                             ? "Multiplier"
-                            : "Calendar"}
+                            : step === "video-editor"
+                              ? "Video Editor"
+                              : "Calendar"}
                       </Link>
                     )}
                   </span>

@@ -36,6 +36,8 @@ export type HubLifetimeMetrics = {
 
 export type HubClientStatus = {
   clipStitchHandoffReady: boolean;
+  /** Present when a stitch handoff is waiting; defaults to multiplier for old stashes. */
+  clipStitchHandoffDestination?: "multiplier" | "video-editor";
   shortProcessing: boolean;
   shortReady: boolean;
   postsScheduledUpcoming: number;

@@ -16,7 +16,10 @@ import {
   rowIsAllDrive,
   type ClipEntry,
 } from "@/lib/stitch-clips";
-import { stashStitchedFiles } from "@/lib/stitch-handoff";
+import {
+  stashStitchedFiles,
+  type StitchHandoffDestination,
+} from "@/lib/stitch-handoff";
 import { incrementClipsStitched } from "@/lib/hub/metrics-store";
 import {
   downloadStitchOutput,
@@ -117,13 +120,35 @@ export default function StitchPage() {
   const [dragOverVideoId, setDragOverVideoId] = useState<string | null>(null);
   const [recoveryBanner, setRecoveryBanner] =
     useState<RecoveryBannerState | null>(null);
+  const [handoffDestination, setHandoffDestination] =
+    useState<StitchHandoffDestination>("multiplier");
 
-  // On mount, check whether a previous stitch batch left in-flight work in
-  // localStorage. We only show the recovery banner when at least one row
-  // is still non-terminal — a batch where every row is already
-  // "completed"/"failed" is just stale, so we clear it and start fresh.
-  useEffect(() => {
+  function updateHandoffDestination(next: StitchHandoffDestination): void {
+    setHandoffDestination(next);
     const batch = readStitchBatch();
+    if (!batch) return;
+    writeStitchBatch({ ...batch, destination: next });
+  }
+
+  // On mount, restore handoff destination from ?to=editor or an in-flight
+  // batch, then check whether a previous stitch batch left recoverable work.
+  useEffect(() => {
+    let restoredDestination: StitchHandoffDestination | null = null;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("to") === "editor") {
+        restoredDestination = "video-editor";
+      }
+    } catch {
+      /* ignore */
+    }
+    const batch = readStitchBatch();
+    if (batch?.destination === "video-editor" || batch?.destination === "multiplier") {
+      restoredDestination = batch.destination;
+    }
+    if (restoredDestination) {
+      setHandoffDestination(restoredDestination);
+    }
     if (!batch) return;
     if (!hasIncompleteRows(batch)) {
       clearStitchBatch();
@@ -313,6 +338,7 @@ export default function StitchPage() {
       batchId,
       createdAt: Date.now(),
       rows: initialRows,
+      destination: handoffDestination,
     };
     writeStitchBatch(batchState);
 
@@ -409,17 +435,23 @@ export default function StitchPage() {
     }
 
     setStatus("redirecting");
+    const destLabel =
+      handoffDestination === "video-editor" ? "Video Editor" : "Multiplier";
     const skippedNote =
       failedRows.length > 0
         ? ` Skipped Video${failedRows.length === 1 ? "" : "s"} ${failedRows.map((f) => f.videoNum).join(", ")} (${failedRows.length} failed).`
         : "";
     setProgressMsg(
-      `Handing off ${handoffFiles.length} stitched video${handoffFiles.length === 1 ? "" : "s"} to home queue…${skippedNote}`
+      `Handing off ${handoffFiles.length} stitched video${handoffFiles.length === 1 ? "" : "s"} to ${destLabel}…${skippedNote}`
     );
-    await stashStitchedFiles(handoffFiles);
+    await stashStitchedFiles(handoffFiles, handoffDestination);
     incrementClipsStitched();
     clearStitchBatch();
-    router.push("/multiplier?fromStitch=1");
+    router.push(
+      handoffDestination === "video-editor"
+        ? "/video-editor?fromStitch=1"
+        : "/multiplier?fromStitch=1"
+    );
   }
 
   /**
@@ -436,6 +468,11 @@ export default function StitchPage() {
     setErrorMsg("");
     setRecoveryBanner(null);
     setStatus("resuming");
+    const destination: StitchHandoffDestination =
+      batch.destination === "video-editor" ? "video-editor" : handoffDestination;
+    if (destination !== handoffDestination) {
+      setHandoffDestination(destination);
+    }
 
     const handoffFiles: Array<{
       blob: Blob;
@@ -525,17 +562,23 @@ export default function StitchPage() {
 
       setStatus("redirecting");
       const recoveredCount = handoffFiles.length;
+      const destLabel =
+        destination === "video-editor" ? "Video Editor" : "Multiplier";
       const missingNote =
         unrecoverable.length > 0
-          ? ` (Skipped Videos ${unrecoverable.map((i) => i + 1).join(", ")} — re-add their clips on the home page.)`
+          ? ` (Skipped Videos ${unrecoverable.map((i) => i + 1).join(", ")} — re-add their clips to retry.)`
           : "";
       setProgressMsg(
-        `Recovered ${recoveredCount} stitched video${recoveredCount === 1 ? "" : "s"}. Handing off to home queue…${missingNote}`
+        `Recovered ${recoveredCount} stitched video${recoveredCount === 1 ? "" : "s"}. Handing off to ${destLabel}…${missingNote}`
       );
-      await stashStitchedFiles(handoffFiles);
+      await stashStitchedFiles(handoffFiles, destination);
       incrementClipsStitched();
       clearStitchBatch();
-      router.push("/multiplier?fromStitch=1");
+      router.push(
+        destination === "video-editor"
+          ? "/video-editor?fromStitch=1"
+          : "/multiplier?fromStitch=1"
+      );
     } catch (e) {
       setStatus("error");
       setErrorMsg(e instanceof Error ? e.message : "Resume failed.");
@@ -564,6 +607,10 @@ export default function StitchPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
           Stitch
         </h1>
+        <p className="mt-2 text-sm text-stone-600">
+          Combine clips into one video, then send it to Multiplier (all formats) or
+          Video Editor (short only).
+        </p>
         {driveInboxConfigured === false ? (
           <p className="mt-1 text-xs text-amber-800">
             Google Drive inbox is not configured on the Video to Short backend
@@ -825,19 +872,64 @@ export default function StitchPage() {
         </div>
       </section>
 
-      <section className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={startStitch}
-          disabled={busy || nonEmptyRows.length < 1}
-          className="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {status === "resuming"
-            ? "Resuming…"
-            : busy
-              ? "Working…"
-              : `Process ${nonEmptyRows.length} video${nonEmptyRows.length === 1 ? "" : "s"} → home`}
-        </button>
+      <section className="space-y-3">
+        <fieldset disabled={busy} className="space-y-2">
+          <legend className="text-sm font-semibold text-stone-800">
+            After stitching, send to
+          </legend>
+          <div className="flex flex-wrap gap-2">
+            <label
+              className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+                handoffDestination === "multiplier"
+                  ? "border-palette-teal bg-palette-pale/30 text-stone-900"
+                  : "border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+              }`}
+            >
+              <input
+                type="radio"
+                name="stitch-handoff"
+                className="sr-only"
+                checked={handoffDestination === "multiplier"}
+                onChange={() => updateHandoffDestination("multiplier")}
+              />
+              Multiplier (all formats)
+            </label>
+            <label
+              className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+                handoffDestination === "video-editor"
+                  ? "border-palette-teal bg-palette-pale/30 text-stone-900"
+                  : "border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+              }`}
+            >
+              <input
+                type="radio"
+                name="stitch-handoff"
+                className="sr-only"
+                checked={handoffDestination === "video-editor"}
+                onChange={() => updateHandoffDestination("video-editor")}
+              />
+              Video Editor (short only)
+            </label>
+          </div>
+        </fieldset>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={startStitch}
+            disabled={busy || nonEmptyRows.length < 1}
+            className="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {status === "resuming"
+              ? "Resuming…"
+              : busy
+                ? "Working…"
+                : `Process ${nonEmptyRows.length} video${nonEmptyRows.length === 1 ? "" : "s"} → ${
+                    handoffDestination === "video-editor"
+                      ? "Video Editor"
+                      : "Multiplier"
+                  }`}
+          </button>
+        </div>
       </section>
 
       {(busy || progressMsg || errorMsg) && (

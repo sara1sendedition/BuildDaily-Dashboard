@@ -20,6 +20,7 @@ export function BuildDailyNav() {
   const videoToolsActive =
     pathname.startsWith("/stitch") ||
     pathname.startsWith("/multiplier") ||
+    pathname.startsWith("/video-editor") ||
     pathname.startsWith("/refine") ||
     pathname.startsWith("/image-post") ||
     pathname.startsWith("/style-carousel");
@@ -69,6 +70,12 @@ export function BuildDailyNav() {
               className="block px-3 py-1.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
             >
               Stitch
+            </Link>
+            <Link
+              href="/video-editor"
+              className="block px-3 py-1.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+            >
+              Video Editor
             </Link>
             <Link
               href="/multiplier"
