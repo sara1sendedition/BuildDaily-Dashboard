@@ -29,8 +29,15 @@ export function BuildDailyNav() {
     <nav className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
       <Link
         href="/"
-        className="font-bold tracking-tight text-[var(--bd-green-800)] mr-1"
+        className="flex items-center gap-2 font-bold tracking-tight text-[var(--bd-green-800)] mr-1"
       >
+        <img
+          src="/content-multiplier-logo.png?v=2"
+          alt=""
+          width={22}
+          height={22}
+          className="rounded-[5px]"
+        />
         BuildDaily
       </Link>
 
