@@ -26,7 +26,7 @@ export const metadata: Metadata = {
   description:
     "From blank page to scheduled posts — Video Studio, Multiplier, calendar, and Comment Converter in one hub.",
   icons: {
-    icon: clientApiPath("/content-multiplier-logo.png"),
+    icon: clientApiPath("/content-multiplier-logo.png?v=2"),
   },
 };
 
