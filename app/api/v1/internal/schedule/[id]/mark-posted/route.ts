@@ -1,23 +1,30 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { denyIfNotInternalAuthorized } from "@/lib/internal-auth";
+import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
 
 /**
  * POST /api/v1/internal/schedule/[id]/mark-posted
  *
- * Used by the Multiplier's publish-due cron to record publish results.
- * Sets `postedAt` and clears any previous `error` on success, or sets
- * `error` only (leaving `postedAt` null) on failure so the next cron
- * tick can retry.
+ * Records publish results. Always clears `publishClaimedAt` so the soft claim
+ * from claim-publish does not stick after success or failure.
  *
  * Body (any subset):
- *   { postedAt?: ISO timestamp | null, error?: string | null }
+ *   { postedAt?: ISO timestamp | null, error?: string | null,
+ *     publishResults?: { instagramMediaId?, facebookPostId?, youtubeVideoId?, tiktokPublishId? } }
  *
  * Auth: `Authorization: Bearer <SCHEDULE_DAEMON_SECRET>`.
  */
 type ParamsCtx = { params: Promise<{ id: string }> };
+
+type PublishResults = {
+  instagramMediaId?: string;
+  facebookPostId?: string;
+  youtubeVideoId?: string;
+  tiktokPublishId?: string;
+};
 
 export async function POST(request: Request, ctx: ParamsCtx) {
   const deny = denyIfNotInternalAuthorized(request);
@@ -25,7 +32,11 @@ export async function POST(request: Request, ctx: ParamsCtx) {
 
   const { id } = await ctx.params;
 
-  let body: { postedAt?: string | null; error?: string | null };
+  let body: {
+    postedAt?: string | null;
+    error?: string | null;
+    publishResults?: PublishResults;
+  };
   try {
     const text = await request.text();
     body = text ? (JSON.parse(text) as typeof body) : {};
@@ -36,7 +47,10 @@ export async function POST(request: Request, ctx: ParamsCtx) {
     );
   }
 
-  const data: Record<string, unknown> = {};
+  const data: Record<string, unknown> = {
+    // Always release the soft claim after a publish attempt settles.
+    publishClaimedAt: null,
+  };
   if ("postedAt" in body) {
     const v = body.postedAt;
     if (v === null) data.postedAt = null;
@@ -57,7 +71,7 @@ export async function POST(request: Request, ctx: ParamsCtx) {
 
   const existing = await prisma.scheduleEntry.findUnique({
     where: { id },
-    select: { id: true },
+    select: { id: true, payload: true },
   });
   if (!existing) {
     return NextResponse.json(
@@ -73,6 +87,39 @@ export async function POST(request: Request, ctx: ParamsCtx) {
       },
     );
   }
+
+  const results = body.publishResults;
+  if (results && typeof results === "object") {
+    const prev =
+      existing.payload && typeof existing.payload === "object"
+        ? ({ ...(existing.payload as Record<string, unknown>) } as Record<
+            string,
+            unknown
+          >)
+        : {};
+    const prevResults =
+      prev.publishResults && typeof prev.publishResults === "object"
+        ? ({ ...(prev.publishResults as Record<string, unknown>) } as Record<
+            string,
+            unknown
+          >)
+        : {};
+    const nextResults = { ...prevResults };
+    for (const key of [
+      "instagramMediaId",
+      "facebookPostId",
+      "youtubeVideoId",
+      "tiktokPublishId",
+    ] as const) {
+      const v = results[key];
+      if (typeof v === "string" && v.trim()) nextResults[key] = v.trim();
+    }
+    data.payload = {
+      ...prev,
+      publishResults: nextResults,
+    } as Prisma.InputJsonValue;
+  }
+
   const row = await prisma.scheduleEntry.update({ where: { id }, data });
   return NextResponse.json({ data: row });
 }

@@ -2,6 +2,7 @@
 
 import { clientApiPath } from "@/lib/client-api-path";
 import type { BunnyAssetUrls } from "@/lib/storage/bunny-upload-client";
+import type { MultiplierOutputsState } from "@/lib/multiplier-queue/output-state";
 
 /**
  * Browser-side client for the Multiplier → Hub queue proxy (Phase 3).
@@ -56,13 +57,14 @@ export type MultiplierQueuePayload = {
   carouselOverride?: string;
   /** Video to Short job id — survives Hub sync for re-process / re-download after refresh. */
   shortJobId?: string;
-  /** Per-item output toggles (e.g. Video Editor short-only). */
-  studioOutputs?: {
-    carousel: boolean;
-    imagePost: boolean;
-    xPost: boolean;
-    reelShort: boolean;
-  };
+  /** Bumps after each Short encode — cache-bust job download and Bunny reel paths. */
+  shortOutputRevision?: number;
+  /** Durable server job id (ProcessingJob). */
+  processingJobId?: string;
+  /** Drive inbox file id when ingested from Drive. */
+  driveFileId?: string;
+  /** Per-output process status + ready-to-schedule flags. */
+  outputs?: MultiplierOutputsState;
 };
 
 /** Wire shape of an item as returned by the Hub. */

@@ -243,14 +243,17 @@ model ScheduleEntry {
   publishAt       DateTime  @map("publish_at") @db.Timestamptz
   payload         Json
   reelVideoStored Boolean   @default(false) @map("reel_video_stored")
-  postedAt        DateTime? @map("posted_at") @db.Timestamptz
-  error           String?
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  postedAt         DateTime? @map("posted_at") @db.Timestamptz
+  /// Soft lock while a publisher is in-flight — not a successful post.
+  publishClaimedAt DateTime? @map("publish_claimed_at") @db.Timestamptz
+  error            String?
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
 
   postPerformance PostPerformance[]
 
   @@index([publishAt])
   @@index([userId, publishAt])
+  @@index([publishClaimedAt])
   @@map("schedule_entries")
 }
 
@@ -617,11 +620,16 @@ model ProcessingJob {
   payload     Json
   status      String    @default("pending")
   error       String?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  leasedAt    DateTime? @map("leased_at") @db.Timestamptz
+  leaseOwner  String?   @map("lease_owner")
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
   processedAt DateTime? @map("processed_at") @db.Timestamptz
 
   @@index([status, createdAt])
   @@index([userId, status])
+  @@index([jobType, status, createdAt])
   @@map("processing_jobs")
 }
 

@@ -28,7 +28,7 @@ export function clipDetailLine(clip: ClipEntry): string {
   }
   const size =
     clip.sizeMb != null ? `${clip.sizeMb} MB` : "Size unknown";
-  return `${size} · Google Drive (server pulls on Process)`;
+  return `${size} · Google Drive`;
 }
 
 export function clipBytesEstimate(clip: ClipEntry): number {

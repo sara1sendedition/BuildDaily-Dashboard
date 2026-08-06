@@ -16,6 +16,11 @@ import {
   parseFirstComment,
   tryPostFirstCommentsAfterPublish,
 } from "@/lib/meta/post-first-comment";
+import {
+  claimScheduleEntryForPublishOnHub,
+  markScheduleEntryPostedOnHub,
+  warnIfHubMarkFailed,
+} from "@/lib/schedule/hub-publish-client";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -42,6 +47,11 @@ type PublishableEntry = {
   postToYouTube: boolean;
   bunnyUrls?: BunnyAssetUrls;
   firstComment?: string;
+  priorResults?: {
+    instagramMediaId?: string;
+    facebookPostId?: string;
+    youtubeVideoId?: string;
+  };
 };
 
 type PublishOk = {
@@ -91,28 +101,39 @@ async function publishOne(
           "Reel MP4 is not available (no Bunny URL on the schedule entry).",
       };
     }
-    let video: Buffer;
-    try {
-      const r = await fetch(reelUrl, { cache: "no-store" });
-      if (!r.ok) throw new Error(`Bunny fetch ${r.status} ${reelUrl}`);
-      video = Buffer.from(await r.arrayBuffer());
-    } catch (err) {
-      return {
-        ok: false,
-        message:
-          err instanceof Error
-            ? `Could not load reel MP4: ${err.message}`
-            : "Reel MP4 fetch failed.",
-      };
+    const prior = e.priorResults ?? {};
+    const needIg = e.postToInstagram && !prior.instagramMediaId;
+    const needFb = e.postToFacebook && !prior.facebookPostId;
+    const needYt = wantsYt && !prior.youtubeVideoId;
+    const needMeta = needIg || needFb;
+
+    let video: Buffer | undefined;
+    if (needMeta || needYt) {
+      try {
+        const r = await fetch(reelUrl, { cache: "no-store" });
+        if (!r.ok) throw new Error(`Bunny fetch ${r.status} ${reelUrl}`);
+        video = Buffer.from(await r.arrayBuffer());
+      } catch (err) {
+        return {
+          ok: false,
+          message:
+            err instanceof Error
+              ? `Could not load reel MP4: ${err.message}`
+              : "Reel MP4 fetch failed.",
+          instagramMediaId: prior.instagramMediaId,
+          facebookPostId: prior.facebookPostId,
+          youtubeVideoId: prior.youtubeVideoId,
+        };
+      }
     }
 
-    let instagramMediaId: string | undefined;
-    let facebookPostId: string | undefined;
-    let youtubeVideoId: string | undefined;
+    let instagramMediaId: string | undefined = prior.instagramMediaId;
+    let facebookPostId: string | undefined = prior.facebookPostId;
+    let youtubeVideoId: string | undefined = prior.youtubeVideoId;
     const errs: string[] = [];
 
     try {
-      if (wantsMeta) {
+      if (needMeta && video) {
         if (!env) {
           errs.push("Meta is not configured.");
         } else {
@@ -122,14 +143,18 @@ async function publishOne(
             accessToken: env.token,
             video,
             caption,
-            publishInstagram: e.postToInstagram,
-            publishFacebook: e.postToFacebook,
+            publishInstagram: needIg,
+            publishFacebook: needFb,
           });
-          instagramMediaId = reelResult.instagramMediaId;
-          facebookPostId = reelResult.facebookVideoId;
+          if (reelResult.instagramMediaId) {
+            instagramMediaId = reelResult.instagramMediaId;
+          }
+          if (reelResult.facebookVideoId) {
+            facebookPostId = reelResult.facebookVideoId;
+          }
         }
       }
-      if (wantsYt && errs.length === 0) {
+      if (needYt && video && errs.length === 0) {
         try {
           const accessToken = await getYoutubeAccessTokenFromRefresh();
           const ytResult = await uploadYoutubeVideoResumable({
@@ -145,16 +170,19 @@ async function publishOne(
           );
         }
       }
-      if (errs.length > 0)
+      const metaDone =
+        (!e.postToInstagram || Boolean(instagramMediaId)) &&
+        (!e.postToFacebook || Boolean(facebookPostId));
+      const ytDone = !wantsYt || Boolean(youtubeVideoId);
+      if (errs.length > 0 || !metaDone || !ytDone) {
         return {
           ok: false,
-          message: errs.join(" "),
-          // Surface any platform that DID publish so the caller can mark the
-          // entry posted and never re-post duplicates on the next tick.
+          message: errs.join(" ") || "Publish incomplete.",
           instagramMediaId,
           facebookPostId,
           youtubeVideoId,
         };
+      }
       const firstCommentExtras = await tryPostFirstCommentsAfterPublish({
         env,
         firstComment: e.firstComment,
@@ -178,7 +206,13 @@ async function publishOne(
           : err instanceof Error
             ? err.message
             : "Unknown error";
-      return { ok: false, message: msg };
+      return {
+        ok: false,
+        message: msg,
+        instagramMediaId,
+        facebookPostId,
+        youtubeVideoId,
+      };
     }
   }
 
@@ -290,27 +324,18 @@ async function fetchDueFromHub(): Promise<
 
 async function markPostedOnHub(
   id: string,
-  body: { postedAt?: string; error?: string | null },
+  body: {
+    postedAt?: string | null;
+    error?: string | null;
+    publishResults?: {
+      instagramMediaId?: string;
+      facebookPostId?: string;
+      youtubeVideoId?: string;
+    };
+  },
 ): Promise<void> {
-  const base = getHubBase();
-  if (!base) return;
-  const secret = process.env.SCHEDULE_DAEMON_SECRET?.trim();
-  if (!secret) return;
-  try {
-    await fetch(
-      `${base}/api/v1/internal/schedule/${encodeURIComponent(id)}/mark-posted`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${secret}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      },
-    );
-  } catch (e) {
-    console.warn("[publish-due] Hub mark-posted crashed:", e);
-  }
+  const mark = await markScheduleEntryPostedOnHub(id, body);
+  if (!mark.ok) warnIfHubMarkFailed("publish-due", id, mark);
 }
 
 function hubEntryToPublishable(row: {
@@ -329,6 +354,21 @@ function hubEntryToPublishable(row: {
       : uiKind === "photo"
         ? "photo"
         : "carousel";
+  const priorRaw =
+    p.publishResults && typeof p.publishResults === "object"
+      ? (p.publishResults as Record<string, unknown>)
+      : {};
+  const priorResults = {
+    ...(typeof priorRaw.instagramMediaId === "string"
+      ? { instagramMediaId: priorRaw.instagramMediaId }
+      : {}),
+    ...(typeof priorRaw.facebookPostId === "string"
+      ? { facebookPostId: priorRaw.facebookPostId }
+      : {}),
+    ...(typeof priorRaw.youtubeVideoId === "string"
+      ? { youtubeVideoId: priorRaw.youtubeVideoId }
+      : {}),
+  };
   return {
     id: row.id,
     scheduleKind,
@@ -339,6 +379,7 @@ function hubEntryToPublishable(row: {
     postToYouTube: p.postToYouTube === true,
     bunnyUrls: bunnyUrlsFromHubSchedulePayload(p),
     firstComment: parseFirstComment(p.firstComment),
+    ...(Object.keys(priorResults).length > 0 ? { priorResults } : {}),
   };
 }
 
@@ -389,11 +430,25 @@ export async function POST(request: Request) {
       });
       continue;
     }
+
+    const claim = await claimScheduleEntryForPublishOnHub(entry.id);
+    if (!claim.ok) {
+      results.push({ id: entry.id, ok: false, detail: claim.message });
+      continue;
+    }
+    if (!claim.claimed) continue;
+
     const r = await publishOne(entry, env);
+    const publishResults = {
+      ...(r.instagramMediaId ? { instagramMediaId: r.instagramMediaId } : {}),
+      ...(r.facebookPostId ? { facebookPostId: r.facebookPostId } : {}),
+      ...(r.youtubeVideoId ? { youtubeVideoId: r.youtubeVideoId } : {}),
+    };
     if (r.ok) {
       await markPostedOnHub(entry.id, {
         postedAt: new Date(checkedAt * 1000).toISOString(),
         error: null,
+        ...(Object.keys(publishResults).length > 0 ? { publishResults } : {}),
       });
       const detail =
         r.firstCommentErrors?.length || r.firstCommentDeferred
@@ -410,21 +465,19 @@ export async function POST(request: Request) {
           : undefined;
       results.push({ id: entry.id, ok: true, ...(detail ? { detail } : {}) });
     } else if (r.instagramMediaId || r.facebookPostId || r.youtubeVideoId) {
-      // Partial publish: at least one platform is already live. Mark the entry
-      // posted so the daemon NEVER re-publishes it — that partial-retry loop is
-      // what spammed duplicate IG/FB posts. Record the failing step instead.
       await markPostedOnHub(entry.id, {
-        postedAt: new Date(checkedAt * 1000).toISOString(),
-        error: `Partially published (not retried to avoid duplicates): ${r.message}`,
+        postedAt: null,
+        error: `Partial publish — will retry remaining platforms: ${r.message}`,
+        publishResults,
       });
       results.push({
         id: entry.id,
         ok: false,
-        detail: `Partially published; marked done to avoid duplicates. ${r.message}`,
+        detail: `Partially published; remaining platforms will retry. ${r.message}`,
       });
     } else {
       // Nothing published — safe to retry next tick (no duplicate risk).
-      await markPostedOnHub(entry.id, { error: r.message });
+      await markPostedOnHub(entry.id, { postedAt: null, error: r.message });
       results.push({ id: entry.id, ok: false, detail: r.message });
     }
   }
