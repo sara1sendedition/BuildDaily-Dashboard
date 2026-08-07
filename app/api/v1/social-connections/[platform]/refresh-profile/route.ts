@@ -23,24 +23,34 @@ type TikTokProfile = {
   avatarUrl: string | null;
 };
 
+function looksLikeAccessTokenAuthError(message: string): boolean {
+  return /access.?token|unauthorized|invalid.?grant|expired|401|scope/i.test(
+    message,
+  );
+}
+
 async function loadTikTokProfile(accessToken: string): Promise<TikTokProfile> {
   // Merge creator_info (username + nickname + avatar) with user.info.basic
   // (open_id + display_name + avatar) so a partial creator_info response does
   // not block filling missing fields from user.info.
   let creator: TikTokProfile | null = null;
   let basic: TikTokProfile | null = null;
+  const errorsFound: string[] = [];
   try {
     creator = await fetchTikTokCreatorProfile(accessToken);
-  } catch {
-    creator = null;
+  } catch (e) {
+    errorsFound.push(e instanceof Error ? e.message : "creator_info failed");
   }
   try {
     basic = await fetchTikTokUserProfile(accessToken);
-  } catch {
-    basic = null;
+  } catch (e) {
+    errorsFound.push(e instanceof Error ? e.message : "user.info failed");
   }
   if (!creator && !basic) {
-    throw new Error("TikTok profile fetch failed.");
+    const authMsg = errorsFound.find((m) => looksLikeAccessTokenAuthError(m));
+    throw new Error(
+      authMsg || errorsFound[0] || "TikTok profile fetch failed.",
+    );
   }
   return {
     openId: basic?.openId || creator?.openId || null,
@@ -56,6 +66,10 @@ async function loadTikTokProfile(accessToken: string): Promise<TikTokProfile> {
  * Same-origin: loads the user's stored tokens, fetches the live platform
  * profile (avatar + nickname), and caches it on the connection row.
  * Currently implemented for TikTok.
+ *
+ * Important: TikTok refresh tokens rotate on every use. We only refresh when
+ * the access token is missing/expired or the profile call looks like an auth
+ * failure — never on rate limits or transient API errors.
  */
 export const POST = withUser(async ({ user, params }) => {
   const platform = params.platform;
@@ -75,9 +89,23 @@ export const POST = withUser(async ({ user, params }) => {
       id: true,
       accessTokenEnc: true,
       refreshTokenEnc: true,
+      tokenExpiresAt: true,
+      externalUsername: true,
+      externalDisplayName: true,
+      externalAvatarUrl: true,
+      externalUserId: true,
     },
   });
   if (!row) return errors.notFound("SocialConnection", platform);
+
+  // Already have the fields Settings needs — avoid live TikTok / token rotation.
+  if (row.externalAvatarUrl && row.externalDisplayName) {
+    const existing = await prisma.socialConnection.findUnique({
+      where: { id: row.id },
+      select: socialConnectionPublicSelect,
+    });
+    return json({ data: existing });
+  }
 
   let accessToken: string | null = null;
   let refreshToken: string | null = null;
@@ -91,20 +119,32 @@ export const POST = withUser(async ({ user, params }) => {
     return errors.internal("Stored token could not be decrypted (key mismatch?).");
   }
 
+  const accessLooksFresh =
+    Boolean(accessToken) &&
+    row.tokenExpiresAt != null &&
+    row.tokenExpiresAt.getTime() > Date.now() + 60_000;
+
   let profile: TikTokProfile | null = null;
   let lastError: string | null = null;
+  let accessAuthFailed = false;
 
-  if (accessToken) {
+  if (accessLooksFresh && accessToken) {
     try {
       profile = await loadTikTokProfile(accessToken);
     } catch (e) {
       lastError =
         e instanceof Error ? e.message : "access token profile fetch failed";
+      accessAuthFailed = looksLikeAccessTokenAuthError(lastError);
       profile = null;
     }
   }
 
-  if (!profile && refreshToken) {
+  const shouldRefresh =
+    !profile &&
+    Boolean(refreshToken) &&
+    (!accessToken || !accessLooksFresh || accessAuthFailed);
+
+  if (shouldRefresh && refreshToken) {
     try {
       const refreshed = await refreshTikTokAccessToken(refreshToken);
       accessToken = refreshed.accessToken;

@@ -733,10 +733,9 @@ async function enrichTikTokProfile(
   conn: SocialConnection,
 ): Promise<SocialConnection> {
   if (conn.platform !== "tiktok") return conn;
-  const needsEnrich =
-    !conn.externalAvatarUrl ||
-    !conn.externalDisplayName ||
-    !conn.externalUsername;
+  // Username alone is often unavailable without extra scopes — don't keep
+  // refreshing (and risk token rotation) just for a missing @handle.
+  const needsEnrich = !conn.externalAvatarUrl || !conn.externalDisplayName;
   if (!needsEnrich) return conn;
 
   try {
@@ -762,9 +761,7 @@ function ConnectionsSection() {
         const tiktok = list.find((c) => c.platform === "tiktok");
         if (
           tiktok &&
-          (!tiktok.externalAvatarUrl ||
-            !tiktok.externalDisplayName ||
-            !tiktok.externalUsername)
+          (!tiktok.externalAvatarUrl || !tiktok.externalDisplayName)
         ) {
           const enriched = await enrichTikTokProfile(tiktok);
           if (cancelled) return;
