@@ -3,8 +3,11 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 /**
- * Starts Google OAuth (offline access) for YouTube upload scope.
+ * Starts Google OAuth (offline access) for YouTube upload + channel profile.
  * Redirect URI must match Google Cloud exactly (see GOOGLE_OAUTH_REDIRECT_URI).
+ *
+ * youtube.upload — publish Shorts
+ * youtube.readonly — read channel title/avatar for Settings
  */
 export async function GET() {
   const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
@@ -26,7 +29,10 @@ export async function GET() {
     response_type: "code",
     access_type: "offline",
     prompt: "consent",
-    scope: "https://www.googleapis.com/auth/youtube.upload",
+    scope: [
+      "https://www.googleapis.com/auth/youtube.upload",
+      "https://www.googleapis.com/auth/youtube.readonly",
+    ].join(" "),
     include_granted_scopes: "true",
   });
 
