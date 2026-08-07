@@ -60,6 +60,8 @@ export async function POST(
       scopes: true,
       externalUserId: true,
       externalUsername: true,
+      externalDisplayName: true,
+      externalAvatarUrl: true,
     },
   });
   if (!row) {
@@ -90,6 +92,8 @@ export async function POST(
       scopes: row.scopes,
       externalUserId: row.externalUserId,
       externalUsername: row.externalUsername,
+      externalDisplayName: row.externalDisplayName,
+      externalAvatarUrl: row.externalAvatarUrl,
     },
   });
 }

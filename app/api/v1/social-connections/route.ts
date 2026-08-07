@@ -8,6 +8,7 @@ import {
   str,
   optStrArr,
 } from "@/app/api/v1/_lib/responses";
+import { socialConnectionPublicSelect } from "@/lib/social-connection-public";
 
 export const runtime = "nodejs";
 
@@ -35,16 +36,7 @@ export const GET = withUser(async ({ user }) => {
   const rows = await prisma.socialConnection.findMany({
     where: { userId: user.id },
     orderBy: { platform: "asc" },
-    select: {
-      id: true,
-      platform: true,
-      externalUserId: true,
-      externalUsername: true,
-      tokenExpiresAt: true,
-      scopes: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+    select: socialConnectionPublicSelect,
   });
   return json({ data: rows });
 });
@@ -73,29 +65,47 @@ export const POST = withUser(async ({ req, user }) => {
       ? new Date(body.tokenExpiresAt)
       : null;
 
+  const profilePatch: {
+    externalUserId?: string | null;
+    externalUsername?: string | null;
+    externalDisplayName?: string | null;
+    externalAvatarUrl?: string | null;
+  } = {};
+  if ("externalUserId" in body) {
+    profilePatch.externalUserId = str(body.externalUserId) ?? null;
+  }
+  if ("externalUsername" in body) {
+    profilePatch.externalUsername = str(body.externalUsername) ?? null;
+  }
+  if ("externalDisplayName" in body) {
+    profilePatch.externalDisplayName = str(body.externalDisplayName) ?? null;
+  }
+  if ("externalAvatarUrl" in body) {
+    profilePatch.externalAvatarUrl = str(body.externalAvatarUrl) ?? null;
+  }
+
   const data = {
     platform,
     accessTokenEnc,
     refreshTokenEnc: str(body.refreshTokenEnc) ?? null,
     tokenExpiresAt,
     scopes: optStrArr(body.scopes) ?? [],
-    externalUserId: str(body.externalUserId) ?? null,
-    externalUsername: str(body.externalUsername) ?? null,
     webhookSecret: str(body.webhookSecret) ?? null,
+    ...profilePatch,
   };
 
   const row = await prisma.socialConnection.upsert({
     where: { userId_platform: { userId: user.id, platform } },
     update: data,
-    create: { userId: user.id, ...data },
-    select: {
-      id: true,
-      platform: true,
-      externalUserId: true,
-      externalUsername: true,
-      tokenExpiresAt: true,
-      scopes: true,
+    create: {
+      userId: user.id,
+      ...data,
+      externalUserId: profilePatch.externalUserId ?? null,
+      externalUsername: profilePatch.externalUsername ?? null,
+      externalDisplayName: profilePatch.externalDisplayName ?? null,
+      externalAvatarUrl: profilePatch.externalAvatarUrl ?? null,
     },
+    select: socialConnectionPublicSelect,
   });
   return json({ data: row });
 });

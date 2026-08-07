@@ -20,7 +20,6 @@ import { useUser, UserButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useState } from "react";
 import { ContentMultiplierHomeLink } from "@/app/components/ContentMultiplierMark";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
-import { VideoToShortExternalLink } from "@/app/components/VideoToShortExternalLink";
 import {
   getDefaultFirstCommentFromStorage,
   MAX_DEFAULT_FIRST_COMMENT_CHARS,
@@ -141,24 +140,7 @@ export default function SettingsPage() {
     <main className="mx-auto max-w-2xl px-4 py-10 pb-20">
       <ContentMultiplierHomeLink className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-palette-depth hover:text-stone-900" />
 
-      <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-stone-900">Settings</h1>
-          <p className="mt-1 text-sm text-stone-600">
-            One place for your whole BuildDaily suite. What you set here feeds
-            the Multiplier, Video Studio, and Comment Convert.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Link href="/multiplier" className={ghostBtn}>
-            Carousel
-          </Link>
-          <Link href="/settings/visual-references" className={ghostBtn}>
-            Visual references
-          </Link>
-          <VideoToShortExternalLink />
-        </div>
-      </div>
+      <h1 className="mb-8 text-2xl font-bold text-stone-900">Settings</h1>
 
       {loading ? (
         <p className="text-sm text-stone-500">Loading your settings…</p>
@@ -715,17 +697,91 @@ function ProductsSection({ brandId }: { brandId: string }) {
 // Connections — one place to see every connected account
 // ---------------------------------------------------------------------------
 
+function ConnectionAvatar({
+  platform,
+  avatarUrl,
+  label,
+}: {
+  platform: string;
+  avatarUrl: string | null;
+  label: string;
+}) {
+  const initial = (label || platform).slice(0, 1).toUpperCase();
+  if (avatarUrl) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element -- remote platform CDN URLs
+      <img
+        src={avatarUrl}
+        alt=""
+        className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-stone-200"
+        referrerPolicy="no-referrer"
+      />
+    );
+  }
+  return (
+    <span
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-stone-200 text-xs font-semibold text-stone-600"
+      aria-hidden
+    >
+      {initial}
+    </span>
+  );
+}
+
+/** Refresh TikTok avatar/nickname via same-origin Hub API (no CORS). */
+async function enrichTikTokProfile(
+  conn: SocialConnection,
+): Promise<SocialConnection> {
+  if (conn.platform !== "tiktok") return conn;
+  const needsEnrich =
+    !conn.externalAvatarUrl ||
+    !conn.externalDisplayName ||
+    !conn.externalUsername;
+  if (!needsEnrich) return conn;
+
+  try {
+    return await hubApi.refreshConnectionProfile("tiktok");
+  } catch {
+    return conn;
+  }
+}
+
 function ConnectionsSection() {
   const [conns, setConns] = useState<SocialConnection[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    hubApi
-      .listConnections()
-      .then((c) => !cancelled && setConns(c))
-      .catch(() => {})
-      .finally(() => !cancelled && setLoading(false));
+    (async () => {
+      try {
+        const list = await hubApi.listConnections();
+        if (cancelled) return;
+        setConns(list);
+        setLoading(false);
+
+        const tiktok = list.find((c) => c.platform === "tiktok");
+        if (
+          tiktok &&
+          (!tiktok.externalAvatarUrl ||
+            !tiktok.externalDisplayName ||
+            !tiktok.externalUsername)
+        ) {
+          const enriched = await enrichTikTokProfile(tiktok);
+          if (cancelled) return;
+          if (
+            enriched.externalAvatarUrl !== tiktok.externalAvatarUrl ||
+            enriched.externalDisplayName !== tiktok.externalDisplayName ||
+            enriched.externalUsername !== tiktok.externalUsername
+          ) {
+            setConns((prev) =>
+              prev.map((c) => (c.platform === "tiktok" ? enriched : c)),
+            );
+          }
+        }
+      } catch {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -756,31 +812,60 @@ function ConnectionsSection() {
         <div className="mt-4 divide-y divide-stone-100">
           {ALL_PLATFORMS.map((platform) => {
             const conn = byPlatform.get(platform);
+            const nickname =
+              conn?.externalDisplayName?.trim() ||
+              conn?.externalUsername?.trim() ||
+              null;
+            const handle = conn?.externalUsername?.trim() || null;
             return (
               <div
                 key={platform}
-                className="flex items-center justify-between py-3"
+                className="flex items-center justify-between gap-3 py-3"
               >
-                <div className="text-sm">
-                  <span className="font-medium capitalize text-stone-900">
-                    {platform}
-                  </span>
-                  {conn?.externalUsername ? (
-                    <span className="ml-2 text-stone-500">
-                      @{conn.externalUsername}
+                <div className="flex min-w-0 items-center gap-3">
+                  {conn ? (
+                    <ConnectionAvatar
+                      platform={platform}
+                      avatarUrl={conn.externalAvatarUrl}
+                      label={nickname ?? platform}
+                    />
+                  ) : (
+                    <span
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-stone-100 text-[10px] font-semibold uppercase text-stone-400"
+                      aria-hidden
+                    >
+                      {platform.slice(0, 2)}
                     </span>
-                  ) : null}
+                  )}
+                  <div className="min-w-0 text-sm">
+                    <div className="font-medium capitalize text-stone-900">
+                      {platform}
+                    </div>
+                    {conn && (nickname || handle) ? (
+                      <div className="truncate text-stone-500">
+                        {conn.externalDisplayName?.trim() ||
+                          (handle ? `@${handle}` : nickname)}
+                        {conn.externalDisplayName?.trim() && handle ? (
+                          <span className="text-stone-400"> @{handle}</span>
+                        ) : null}
+                      </div>
+                    ) : conn ? (
+                      <div className="text-stone-400">Connected</div>
+                    ) : null}
+                  </div>
                 </div>
                 {conn ? (
                   <button
                     type="button"
-                    className="text-xs font-medium text-stone-500 hover:text-red-600"
+                    className="shrink-0 text-xs font-medium text-stone-500 hover:text-red-600"
                     onClick={() => disconnect(platform)}
                   >
                     Disconnect
                   </button>
                 ) : (
-                  <span className="text-xs text-stone-400">Not connected</span>
+                  <span className="shrink-0 text-xs text-stone-400">
+                    Not connected
+                  </span>
                 )}
               </div>
             );

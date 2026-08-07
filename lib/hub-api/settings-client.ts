@@ -75,6 +75,8 @@ export type SocialConnection = {
   platform: string;
   externalUserId: string | null;
   externalUsername: string | null;
+  externalDisplayName: string | null;
+  externalAvatarUrl: string | null;
   tokenExpiresAt: string | null;
   scopes: string[];
 };
@@ -143,6 +145,24 @@ export const hubApi = {
   // ---- Connections ------------------------------------------------------
   listConnections: () =>
     req<SocialConnection[]>("/api/v1/social-connections"),
+  updateConnectionProfile: (
+    platform: string,
+    patch: {
+      externalUsername?: string | null;
+      externalDisplayName?: string | null;
+      externalAvatarUrl?: string | null;
+      externalUserId?: string | null;
+    },
+  ) =>
+    req<SocialConnection>(`/api/v1/social-connections/${platform}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  refreshConnectionProfile: (platform: string) =>
+    req<SocialConnection>(
+      `/api/v1/social-connections/${platform}/refresh-profile`,
+      { method: "POST" },
+    ),
   deleteConnection: (platform: string) =>
     req<void>(`/api/v1/social-connections/${platform}`, { method: "DELETE" }),
 

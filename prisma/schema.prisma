@@ -224,9 +224,13 @@ model SocialConnection {
   refreshTokenEnc  String?   @map("refresh_token_enc")
   tokenExpiresAt   DateTime? @map("token_expires_at") @db.Timestamptz
   scopes           String[]
-  externalUserId   String?   @map("external_user_id")
-  externalUsername String?   @map("external_username")
-  webhookSecret    String?   @map("webhook_secret")
+  externalUserId      String?   @map("external_user_id")
+  externalUsername    String?   @map("external_username")
+  /// Display name / nickname from the platform (e.g. TikTok creator nickname).
+  externalDisplayName String?   @map("external_display_name")
+  /// Profile avatar URL from the platform (may expire; refresh on next connect).
+  externalAvatarUrl   String?   @map("external_avatar_url")
+  webhookSecret       String?   @map("webhook_secret")
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
