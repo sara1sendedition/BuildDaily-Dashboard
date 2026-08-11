@@ -197,16 +197,33 @@ export async function remuxMp4Faststart(
   inputPath: string,
   outputPath: string,
 ): Promise<void> {
-  await execBinary("ffmpeg", [
-    "-y",
-    "-i",
-    inputPath,
-    "-c",
-    "copy",
-    "-movflags",
-    "+faststart",
-    outputPath,
-  ]);
+  const resolved = resolveBinary("ffmpeg");
+  try {
+    // `-f mp4` is required when the output path is a unique temp name that may
+    // not end in `.mp4`. `-hide_banner -loglevel error` keeps stderr tiny so
+    // Node's default maxBuffer cannot kill a healthy remux mid-flight.
+    await execFileAsync(
+      resolved,
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        inputPath,
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        outputPath,
+      ],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+  } catch (err) {
+    throw enrichSpawnError(err, "ffmpeg");
+  }
 }
 
 /** Remux a buffer in a temp dir; returns the faststart buffer (or original on failure). */

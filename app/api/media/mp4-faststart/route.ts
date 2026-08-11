@@ -51,8 +51,10 @@ async function ensureFaststartFile(raw: string, outPath: string): Promise<void> 
         if (st.size > 0) return;
       }
       const id = randomUUID();
-      const inPath = `${outPath}.${id}.src`;
-      const tmpOut = `${outPath}.${id}.tmp`;
+      // Extensions must stay `.mp4` so ffmpeg (and any fallback without `-f`)
+      // still treats these as MP4 even if `-f mp4` were omitted.
+      const inPath = `${outPath}.${id}.src.mp4`;
+      const tmpOut = `${outPath}.${id}.out.mp4`;
       try {
         const res = await fetch(raw, { cache: "no-store" });
         if (!res.ok) {
@@ -156,14 +158,40 @@ export async function GET(request: Request) {
       }),
     });
   } catch (e) {
-    return NextResponse.json(
-      {
-        error:
-          e instanceof Error
-            ? e.message
-            : "Could not prepare mobile-friendly MP4 preview.",
-      },
-      { status: 502 },
-    );
+    const rawMsg =
+      e instanceof Error
+        ? e.message
+        : "Could not prepare mobile-friendly MP4 preview.";
+    // Never ship multi-KB ffmpeg banners to the phone UI.
+    const shortMsg = sanitizeFfmpegError(rawMsg);
+    return NextResponse.json({ error: shortMsg }, { status: 502 });
   }
+}
+
+function sanitizeFfmpegError(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) return "Could not prepare mobile-friendly MP4 preview.";
+  // Node wraps failures as `Command failed: …\n<stderr>`.
+  if (/maxBuffer/i.test(trimmed)) {
+    return "Preview remux timed out or produced too much log output. Try again.";
+  }
+  if (/suitable output format/i.test(trimmed) || /Error opening output/i.test(trimmed)) {
+    return "Could not remux this reel for mobile preview.";
+  }
+  if (/ENOENT|not found|FFMPEG_INSTALL|not on your PATH/i.test(trimmed)) {
+    return "FFmpeg is not available on the server for mobile preview.";
+  }
+  // Prefer the last meaningful line over the configuration banner.
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => !l.startsWith("--enable-") && !l.startsWith("configuration:"));
+  const last = lines[lines.length - 1] ?? trimmed;
+  if (last.length > 180) return `${last.slice(0, 177)}…`;
+  // If we still only have the banner, fall back to a generic line.
+  if (/libavutil|libavcodec|ffmpeg version/i.test(last) && lines.length < 3) {
+    return "Could not prepare mobile-friendly MP4 preview.";
+  }
+  return last;
 }

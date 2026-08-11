@@ -137,8 +137,11 @@ export function ShortPreviewPlayer({
         ) : null}
 
         {error ? (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-stone-950 px-4">
-            <p className="text-center text-sm text-amber-100" role="alert">
+          <div className="absolute inset-0 z-10 flex items-center justify-center overflow-y-auto bg-stone-950 px-4 py-6">
+            <p
+              className="max-h-full text-center text-xs leading-relaxed text-amber-100 break-words"
+              role="alert"
+            >
               {error}
             </p>
           </div>
