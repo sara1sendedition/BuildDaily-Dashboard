@@ -18,6 +18,10 @@ const isPublic = createRouteMatcher([
   "/api/clerk/webhook",
   "/api/v1/internal/(.*)",
   "/api/schedule/(.*)",
+  // Media preview authenticates itself (Clerk session in-handler OR HMAC).
+  // Must not use auth.protect() — that 302s to HTML sign-in and iPhone Safari
+  // surfaces it as a native "Load Failed" on <video>.
+  "/api/media/(.*)",
 ]);
 
 // Sibling BuildDaily apps allowed to call the hub's /api/v1 cross-origin with
