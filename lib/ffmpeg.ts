@@ -259,6 +259,73 @@ export async function remuxMp4Faststart(
   throw enrichSpawnError(lastErr, "ffmpeg");
 }
 
+/**
+ * Transcode a reel into a maximally iPhone-Safari-safe MP4 for in-app preview.
+ * Baseline H.264 + AAC-LC + yuv420p + faststart. Caps long edge at 1280 so
+ * first-open remux stays reasonable on small Hub boxes.
+ */
+export async function transcodeMp4ForIosPreview(
+  inputPath: string,
+  outputPath: string,
+): Promise<void> {
+  const resolved = resolveBinary("ffmpeg");
+  try {
+    await execFileAsync(
+      resolved,
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        inputPath,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        "scale='min(720,iw)':-2:flags=bicubic,format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "baseline",
+        "-level",
+        "3.1",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-profile:a",
+        "aac_low",
+        "-b:a",
+        "128k",
+        "-ac",
+        "2",
+        "-ar",
+        "44100",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        outputPath,
+      ],
+      { maxBuffer: 8 * 1024 * 1024 },
+    );
+  } catch (err) {
+    // Fall back to stream-copy remux if encode isn't available (rare).
+    try {
+      await remuxMp4Faststart(inputPath, outputPath);
+      return;
+    } catch {
+      throw enrichSpawnError(err, "ffmpeg");
+    }
+  }
+}
+
 /** Remux a buffer in a temp dir; returns the faststart buffer (or original on failure). */
 export async function ensureMp4FaststartBuffer(
   buffer: Buffer,

@@ -11,12 +11,20 @@ type Props = {
   onMediaError?: () => void;
 };
 
+function looksLikeMp4(buf: ArrayBuffer): boolean {
+  if (buf.byteLength < 12) return false;
+  const bytes = new Uint8Array(buf, 0, Math.min(64, buf.byteLength));
+  // ISO BMFF: size(4) + 'ftyp' at offset 4
+  const tag = String.fromCharCode(bytes[4]!, bytes[5]!, bytes[6]!, bytes[7]!);
+  return tag === "ftyp";
+}
+
 /**
  * Vertical Short/Reel preview (9:16).
  *
- * For remux proxy URLs: warm via authenticated `?prepare=1` (waits for ffmpeg),
- * then play a signed cookie-less URL so iOS Safari never hits a Clerk redirect
- * mid-stream (that shows up as native "Load Failed").
+ * Warm remux with `prepare=1`, download the signed MP4 into a blob, then play
+ * locally. iPhone Safari is unreliable with Range-streamed API `<video src>`
+ * even when the bytes are fine — blobs avoid that class of failure.
  */
 export function ShortPreviewPlayer({
   url,
@@ -27,6 +35,7 @@ export function ShortPreviewPlayer({
 }: Props) {
   const [src, setSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState("Preparing vertical preview…");
   const [error, setError] = useState<string | null>(null);
   const ownedBlobRef = useRef<string | null>(null);
 
@@ -40,10 +49,40 @@ export function ShortPreviewPlayer({
       }
     }
 
+    async function loadAsBlob(playUrl: string): Promise<string> {
+      const res = await fetch(playUrl, {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        let detail = `Preview download failed (${res.status}).`;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j?.error) detail = j.error;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      const type = (res.headers.get("content-type") || "").toLowerCase();
+      if (type.includes("json") || type.includes("text/html")) {
+        throw new Error("Preview endpoint returned a non-video response.");
+      }
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength < 64) throw new Error("Preview file was empty.");
+      if (!looksLikeMp4(buf)) {
+        throw new Error(
+          "Preview bytes were not a valid MP4 (server may have returned an error page).",
+        );
+      }
+      return URL.createObjectURL(new Blob([buf], { type: "video/mp4" }));
+    }
+
     async function prepare() {
       setLoading(true);
       setError(null);
       setSrc(null);
+      setStatus("Preparing vertical preview…");
       revokeOwned();
 
       const raw = url.trim();
@@ -65,8 +104,10 @@ export function ShortPreviewPlayer({
       const isFaststartProxy = raw.includes("/api/media/mp4-faststart");
 
       try {
+        let playUrl = raw;
+
         if (isFaststartProxy) {
-          // 1) Warm remux with session cookies (may take a while on first play).
+          setStatus("Encoding a phone-friendly preview…");
           const prepareUrl = raw.includes("prepare=1")
             ? raw
             : `${raw}${raw.includes("?") ? "&" : "?"}prepare=1`;
@@ -85,43 +126,20 @@ export function ShortPreviewPlayer({
             throw new Error(detail);
           }
           const body = (await prep.json()) as { playUrl?: string };
-          const playUrl = body.playUrl?.trim();
-          if (!playUrl) {
+          const signed = body.playUrl?.trim();
+          if (!signed) {
             throw new Error("Preview prepare did not return a play URL.");
           }
-          if (!cancelled) {
-            setSrc(playUrl);
-            setLoading(false);
-          }
-          return;
+          playUrl = signed;
         }
 
-        // Job-download / other same-origin APIs: fetch to blob (avoids Clerk
-        // redirect on <video> and works once bytes are local).
-        if (raw.startsWith("/") || raw.includes("/api/")) {
-          const res = await fetch(raw, {
-            credentials: "same-origin",
-            cache: "no-store",
-          });
-          if (!res.ok) {
-            let detail = `Preview failed (${res.status}).`;
-            try {
-              const j = (await res.json()) as { error?: string };
-              if (j?.error) detail = j.error;
-            } catch {
-              /* ignore */
-            }
-            throw new Error(detail);
-          }
-          const type = (res.headers.get("content-type") || "").toLowerCase();
-          if (type.includes("json") || type.includes("text/html")) {
-            throw new Error("Preview endpoint returned a non-video response.");
-          }
-          const buf = await res.arrayBuffer();
-          if (buf.byteLength < 64) throw new Error("Preview file was empty.");
-          const objectUrl = URL.createObjectURL(
-            new Blob([buf], { type: "video/mp4" }),
-          );
+        if (
+          playUrl.startsWith("/") ||
+          playUrl.includes("/api/") ||
+          isFaststartProxy
+        ) {
+          setStatus("Downloading preview…");
+          const objectUrl = await loadAsBlob(playUrl);
           if (cancelled) {
             URL.revokeObjectURL(objectUrl);
             return;
@@ -132,9 +150,8 @@ export function ShortPreviewPlayer({
           return;
         }
 
-        // Absolute CDN URL (should already be wrapped by caller).
         if (!cancelled) {
-          setSrc(raw);
+          setSrc(playUrl);
           setLoading(false);
         }
       } catch (e) {
@@ -174,7 +191,7 @@ export function ShortPreviewPlayer({
               aria-hidden
             />
             <p className="px-4 text-center text-xs font-medium text-stone-300">
-              Preparing vertical preview…
+              {status}
             </p>
           </div>
         ) : null}
@@ -196,7 +213,7 @@ export function ShortPreviewPlayer({
             src={src}
             controls
             playsInline
-            preload="metadata"
+            preload="auto"
             className="absolute inset-0 h-full w-full object-contain"
             onLoadedData={() => setLoading(false)}
             onLoadedMetadata={(e) => {
@@ -206,7 +223,7 @@ export function ShortPreviewPlayer({
             }}
             onError={() => {
               setError(
-                "Preview still could not play on this device. Try Download MP4, or re-open this Short after a refresh.",
+                "Phone still rejected the preview file after re-encode. Use Download MP4 for now.",
               );
               onMediaError?.();
             }}

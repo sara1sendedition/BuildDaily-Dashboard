@@ -6,24 +6,24 @@ import { tmpdir } from "os";
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { isAllowedSourceVideoUrl } from "@/lib/allowed-source-video-url";
-import { remuxMp4Faststart } from "@/lib/ffmpeg";
+import { transcodeMp4ForIosPreview } from "@/lib/ffmpeg";
 import {
   signMp4PreviewAccess,
   verifyMp4PreviewAccess,
 } from "@/lib/media/mp4-preview-sign";
 
 export const runtime = "nodejs";
-export const maxDuration = 180;
+export const maxDuration = 300;
 
-// v3: AAC remux + signed cookie-less playback for iOS.
-const CACHE_DIR = path.join(tmpdir(), "builddaily-mp4-faststart-v3");
+// v4: full baseline H.264 transcode for iPhone Safari preview.
+const CACHE_DIR = path.join(tmpdir(), "builddaily-mp4-faststart-v4");
 
 /** One remux per source URL per process — avoids corrupt overlapping writes. */
 const inflightRemux = new Map<string, Promise<void>>();
 
 function cachePathForUrl(url: string): string {
   const hash = createHash("sha256")
-    .update(`v3:${url}`)
+    .update(`v4:${url}`)
     .digest("hex")
     .slice(0, 40);
   return path.join(CACHE_DIR, `${hash}.mp4`);
@@ -69,7 +69,7 @@ async function ensureFaststartFile(raw: string, outPath: string): Promise<void> 
           throw new Error("Source video was empty.");
         }
         await fs.writeFile(inPath, buf);
-        await remuxMp4Faststart(inPath, tmpOut);
+        await transcodeMp4ForIosPreview(inPath, tmpOut);
         const st = await fs.stat(tmpOut);
         if (st.size === 0) {
           throw new Error("Faststart remux produced an empty file.");
