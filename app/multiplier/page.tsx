@@ -22,6 +22,7 @@ import {
 } from "@/lib/meta/publish-meta-client";
 import { postYoutubeShortPublish } from "@/lib/youtube/publish-youtube-client";
 import { mobileFriendlyMp4PreviewUrl } from "@/lib/media/mobile-friendly-mp4-preview-url";
+import { ShortPreviewPlayer } from "@/app/components/ShortPreviewPlayer";
 import { slidesForMetaFromZipOrSnapshot } from "@/lib/schedule/slides-for-meta-from-snapshot";
 import {
   getCarouselFocusFromStorage,
@@ -1731,16 +1732,10 @@ export default function Home() {
                         </div>
                       ) : null}
                       {shortPreviewUrl ? (
-                        <video
-                          key={shortPreviewUrl}
-                          controls
-                          playsInline
-                          preload="metadata"
-                          className={`mx-auto max-h-[min(52vh,520px)] w-full max-w-lg rounded-xl border border-stone-200 bg-black object-contain shadow-inner ${shortReprocessBusy ? "pointer-events-none opacity-60" : ""}`}
-                        >
-                          <source src={shortPreviewUrl} type="video/mp4" />
-                          Your browser does not support embedded video.
-                        </video>
+                        <ShortPreviewPlayer
+                          url={shortPreviewUrl}
+                          blocked={shortReprocessBusy}
+                        />
                       ) : shortJobId || shortError ? (
                         <p className="text-sm text-stone-600">
                           {shortResumeBusy

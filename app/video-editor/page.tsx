@@ -10,6 +10,8 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { QueueItemEditableTitle } from "@/app/components/QueueItemEditableTitle";
 import { DriveInboxPanel } from "@/app/components/DriveInboxPanel";
 import { ShortEditPanel } from "@/app/components/ShortEditPanel";
+import { ShortPreviewPlayer } from "@/app/components/ShortPreviewPlayer";
+import { mobileFriendlyMp4PreviewUrl } from "@/lib/media/mobile-friendly-mp4-preview-url";
 import {
   useCarouselWorkspace,
   SHORT_ONLY_STUDIO_OUTPUTS,
@@ -373,14 +375,14 @@ export default function VideoEditorPage() {
       setShortPreviewUrl(null);
       return;
     }
-    if (shortOutputFile) {
+    if (shortOutputFile && shortOutputFile.size > 0) {
       const url = URL.createObjectURL(shortOutputFile);
       setShortPreviewUrl(url);
       return () => URL.revokeObjectURL(url);
     }
     const remote = reelMp4Url?.trim();
     if (remote) {
-      setShortPreviewUrl(remote);
+      setShortPreviewUrl(mobileFriendlyMp4PreviewUrl(remote));
       return;
     }
     if (shortJobPreviewEligible && shortJobId) {
@@ -753,15 +755,10 @@ export default function VideoEditorPage() {
                   </div>
                 ) : null}
                 {shortPreviewUrl ? (
-                  <video
-                    key={shortPreviewUrl}
-                    src={shortPreviewUrl}
-                    controls
-                    playsInline
-                    className={`mx-auto max-h-[min(52vh,520px)] w-full max-w-lg rounded-xl border border-stone-200 bg-black object-contain shadow-inner ${shortReprocessBusy ? "pointer-events-none opacity-60" : ""}`}
-                  >
-                    Your browser does not support embedded video.
-                  </video>
+                  <ShortPreviewPlayer
+                    url={shortPreviewUrl}
+                    blocked={shortReprocessBusy}
+                  />
                 ) : (
                   <p className="text-sm text-stone-600">
                     {shortResumeBusy

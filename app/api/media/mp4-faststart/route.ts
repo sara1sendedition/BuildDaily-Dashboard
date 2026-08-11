@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { createReadStream, existsSync } from "fs";
+import { existsSync } from "fs";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { tmpdir } from "os";
@@ -16,6 +16,20 @@ const CACHE_DIR = path.join(tmpdir(), "builddaily-mp4-faststart");
 function cachePathForUrl(url: string): string {
   const hash = createHash("sha256").update(url).digest("hex").slice(0, 40);
   return path.join(CACHE_DIR, `${hash}.mp4`);
+}
+
+function videoHeaders(extra: Record<string, string> = {}): Headers {
+  // `no-transform` is required: edge proxies (Coolify/nginx) otherwise gzip the
+  // MP4 body on 200 responses, which breaks <video> playback (black frame, play
+  // does nothing). Same pattern as /api/video-to-short/jobs/.../download.
+  const headers = new Headers({
+    "Content-Type": "video/mp4",
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=3600, no-transform",
+    "X-Content-Type-Options": "nosniff",
+    ...extra,
+  });
+  return headers;
 }
 
 /**
@@ -74,8 +88,10 @@ export async function GET(request: Request) {
       }
     }
 
-    const st = await fs.stat(outPath);
-    const size = st.size;
+    // Buffer-based Range responses (not Node streams) so iOS Safari seek/play
+    // works reliably through Next.js.
+    const file = await fs.readFile(outPath);
+    const size = file.byteLength;
     const range = request.headers.get("range");
     if (range) {
       const m = /^bytes=(\d*)-(\d*)$/i.exec(range.trim());
@@ -90,34 +106,23 @@ export async function GET(request: Request) {
           start < size
         ) {
           const safeEnd = Math.min(end, size - 1);
-          const chunkSize = safeEnd - start + 1;
-          const stream = createReadStream(outPath, {
-            start,
-            end: safeEnd,
-          });
-          return new NextResponse(stream as unknown as BodyInit, {
+          const chunk = file.subarray(start, safeEnd + 1);
+          return new NextResponse(chunk, {
             status: 206,
-            headers: {
-              "Content-Type": "video/mp4",
-              "Content-Length": String(chunkSize),
+            headers: videoHeaders({
+              "Content-Length": String(chunk.byteLength),
               "Content-Range": `bytes ${start}-${safeEnd}/${size}`,
-              "Accept-Ranges": "bytes",
-              "Cache-Control": "private, max-age=3600",
-            },
+            }),
           });
         }
       }
     }
 
-    const stream = createReadStream(outPath);
-    return new NextResponse(stream as unknown as BodyInit, {
+    return new NextResponse(file, {
       status: 200,
-      headers: {
-        "Content-Type": "video/mp4",
+      headers: videoHeaders({
         "Content-Length": String(size),
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "private, max-age=3600",
-      },
+      }),
     });
   } catch (e) {
     return NextResponse.json(
