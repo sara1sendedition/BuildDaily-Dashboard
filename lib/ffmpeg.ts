@@ -192,38 +192,71 @@ export async function extractAudioMp3(
 /**
  * Remux an MP4 so the moov atom is at the front (`+faststart`). Required for
  * reliable iOS Safari progressive playback of CDN-hosted Shorts.
+ *
+ * Video is stream-copied; audio is re-encoded to AAC when present so iPhone
+ * Safari does not reject uncommon audio codecs inside an otherwise-valid MP4.
  */
 export async function remuxMp4Faststart(
   inputPath: string,
   outputPath: string,
 ): Promise<void> {
   const resolved = resolveBinary("ffmpeg");
-  try {
-    // `-f mp4` is required when the output path is a unique temp name that may
-    // not end in `.mp4`. `-hide_banner -loglevel error` keeps stderr tiny so
-    // Node's default maxBuffer cannot kill a healthy remux mid-flight.
-    await execFileAsync(
-      resolved,
-      [
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        inputPath,
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        "-f",
-        "mp4",
-        outputPath,
-      ],
-      { maxBuffer: 8 * 1024 * 1024 },
-    );
-  } catch (err) {
-    throw enrichSpawnError(err, "ffmpeg");
+  const common = [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    inputPath,
+  ] as const;
+
+  const attempts: string[][] = [
+    // Prefer: copy video, AAC audio (iOS-safe), faststart.
+    [
+      ...common,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a:0?",
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-ac",
+      "2",
+      "-ar",
+      "44100",
+      "-movflags",
+      "+faststart",
+      "-f",
+      "mp4",
+      outputPath,
+    ],
+    // Fallback: pure stream copy (no audio re-encode).
+    [
+      ...common,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      "-f",
+      "mp4",
+      outputPath,
+    ],
+  ];
+
+  let lastErr: unknown;
+  for (const args of attempts) {
+    try {
+      await execFileAsync(resolved, args, { maxBuffer: 8 * 1024 * 1024 });
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  throw enrichSpawnError(lastErr, "ffmpeg");
 }
 
 /** Remux a buffer in a temp dir; returns the faststart buffer (or original on failure). */

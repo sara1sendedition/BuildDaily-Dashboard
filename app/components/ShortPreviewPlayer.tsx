@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Props = {
   url: string;
@@ -11,11 +11,27 @@ type Props = {
   onMediaError?: () => void;
 };
 
+type PlayMode = "direct" | "blob";
+
+function isSameOriginApiUrl(raw: string): boolean {
+  if (raw.startsWith("/")) return true;
+  try {
+    const u = new URL(raw, typeof window !== "undefined" ? window.location.href : "https://local");
+    if (typeof window !== "undefined" && u.origin === window.location.origin) {
+      return u.pathname.includes("/api/");
+    }
+  } catch {
+    /* ignore */
+  }
+  return raw.includes("/api/media/mp4-faststart") || raw.includes("/api/video-to-short/");
+}
+
 /**
- * Vertical Short/Reel preview. Fetches authenticated/proxy URLs to a blob so
- * iOS Safari gets a playable object URL (avoids edge-gzip + flaky Range on
- * API routes). Layout is locked to 9:16 so a failed/pending load does not
- * look like a wide landscape black box.
+ * Vertical Short/Reel preview (9:16).
+ *
+ * Prefer a same-origin remuxed URL as `<video src>` so iOS Safari can Range-
+ * stream it. Fall back to a blob object URL once if direct play fails (some
+ * WebViews dislike certain proxied responses). Never dump server logs here.
  */
 export function ShortPreviewPlayer({
   url,
@@ -25,30 +41,39 @@ export function ShortPreviewPlayer({
   onMediaError,
 }: Props) {
   const [src, setSrc] = useState<string | null>(null);
+  const [mode, setMode] = useState<PlayMode>("direct");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const ownedBlobRef = useRef<string | null>(null);
+  const triedBlobRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-    let objectUrl: string | null = null;
-    /** Only revoke URLs we created — never parent-owned `blob:` props. */
-    let ownsObjectUrl = false;
+    triedBlobRef.current = false;
 
-    async function prepare() {
+    function revokeOwned() {
+      if (ownedBlobRef.current) {
+        URL.revokeObjectURL(ownedBlobRef.current);
+        ownedBlobRef.current = null;
+      }
+    }
+
+    async function prepare(nextMode: PlayMode) {
       setLoading(true);
       setError(null);
-      setSrc(null);
+      setMode(nextMode);
 
       const raw = url.trim();
       if (!raw) {
+        setSrc(null);
         setError("No preview URL.");
         setLoading(false);
         onMediaError?.();
         return;
       }
 
-      // Local blobs are already playable — do not re-fetch or revoke.
       if (raw.startsWith("blob:")) {
+        revokeOwned();
         if (!cancelled) {
           setSrc(raw);
           setLoading(false);
@@ -56,6 +81,17 @@ export function ShortPreviewPlayer({
         return;
       }
 
+      if (nextMode === "direct" && isSameOriginApiUrl(raw)) {
+        revokeOwned();
+        if (!cancelled) {
+          // `#t=0.001` nudges iOS to decode a first frame for the poster.
+          setSrc(raw.includes("#") ? raw : `${raw}#t=0.001`);
+          setLoading(false);
+        }
+        return;
+      }
+
+      // Blob path: full download (used as fallback, or for odd absolute URLs).
       try {
         const res = await fetch(raw, {
           credentials: "same-origin",
@@ -75,25 +111,24 @@ export function ShortPreviewPlayer({
         if (type.includes("json") || type.includes("text/html")) {
           throw new Error("Preview endpoint returned a non-video response.");
         }
-        const blob = await res.blob();
-        if (blob.size < 64) {
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength < 64) {
           throw new Error("Preview file was empty.");
         }
-        objectUrl = URL.createObjectURL(
-          blob.type.startsWith("video/")
-            ? blob
-            : new Blob([blob], { type: "video/mp4" }),
+        // Always label as video/mp4 — iOS is picky about blob MIME types.
+        const objectUrl = URL.createObjectURL(
+          new Blob([buf], { type: "video/mp4" }),
         );
-        ownsObjectUrl = true;
         if (cancelled) {
           URL.revokeObjectURL(objectUrl);
-          objectUrl = null;
-          ownsObjectUrl = false;
           return;
         }
+        revokeOwned();
+        ownedBlobRef.current = objectUrl;
         setSrc(objectUrl);
       } catch (e) {
         if (!cancelled) {
+          setSrc(null);
           setError(e instanceof Error ? e.message : "Could not load preview.");
           onMediaError?.();
         }
@@ -102,14 +137,62 @@ export function ShortPreviewPlayer({
       }
     }
 
-    void prepare();
+    void prepare(
+      isSameOriginApiUrl(url.trim()) || url.trim().startsWith("blob:")
+        ? "direct"
+        : "blob",
+    );
+
     return () => {
       cancelled = true;
-      if (ownsObjectUrl && objectUrl) URL.revokeObjectURL(objectUrl);
+      revokeOwned();
     };
-    // Intentionally only re-fetch when `url` changes; callbacks are latest via closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
+
+  async function handleMediaError() {
+    // One automatic fallback: direct → blob.
+    if (mode === "direct" && !triedBlobRef.current && !url.trim().startsWith("blob:")) {
+      triedBlobRef.current = true;
+      setLoading(true);
+      setError(null);
+      setMode("blob");
+      try {
+        const res = await fetch(url.trim(), {
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (!res.ok) {
+          let detail = `Preview failed (${res.status}).`;
+          try {
+            const j = (await res.json()) as { error?: string };
+            if (j?.error) detail = j.error;
+          } catch {
+            /* ignore */
+          }
+          throw new Error(detail);
+        }
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength < 64) throw new Error("Preview file was empty.");
+        if (ownedBlobRef.current) URL.revokeObjectURL(ownedBlobRef.current);
+        const objectUrl = URL.createObjectURL(
+          new Blob([buf], { type: "video/mp4" }),
+        );
+        ownedBlobRef.current = objectUrl;
+        setSrc(objectUrl);
+        setLoading(false);
+        return;
+      } catch (e) {
+        setSrc(null);
+        setError(e instanceof Error ? e.message : "Could not load preview.");
+        setLoading(false);
+        onMediaError?.();
+        return;
+      }
+    }
+    setError("This device could not play the preview.");
+    onMediaError?.();
+  }
 
   return (
     <div
@@ -139,7 +222,7 @@ export function ShortPreviewPlayer({
         {error ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center overflow-y-auto bg-stone-950 px-4 py-6">
             <p
-              className="max-h-full text-center text-xs leading-relaxed text-amber-100 break-words"
+              className="max-h-full break-words text-center text-xs leading-relaxed text-amber-100"
               role="alert"
             >
               {error}
@@ -153,19 +236,17 @@ export function ShortPreviewPlayer({
             src={src}
             controls
             playsInline
-            preload="auto"
+            preload="metadata"
+            controlsList="nodownload"
             className="absolute inset-0 h-full w-full object-contain"
+            onLoadedData={() => setLoading(false)}
             onLoadedMetadata={(e) => {
+              setLoading(false);
               const d = e.currentTarget.duration;
               if (Number.isFinite(d) && d > 0) onDurationSec?.(d);
-              else {
-                setError("Could not read video duration.");
-                onMediaError?.();
-              }
             }}
             onError={() => {
-              setError("This device could not play the preview.");
-              onMediaError?.();
+              void handleMediaError();
             }}
           />
         ) : null}

@@ -11,13 +11,13 @@ import { remuxMp4Faststart } from "@/lib/ffmpeg";
 export const runtime = "nodejs";
 export const maxDuration = 180;
 
-const CACHE_DIR = path.join(tmpdir(), "builddaily-mp4-faststart");
+const CACHE_DIR = path.join(tmpdir(), "builddaily-mp4-faststart-v2");
 
 /** One remux per source URL per process — avoids corrupt overlapping writes. */
 const inflightRemux = new Map<string, Promise<void>>();
 
 function cachePathForUrl(url: string): string {
-  const hash = createHash("sha256").update(url).digest("hex").slice(0, 40);
+  const hash = createHash("sha256").update(`v2:${url}`).digest("hex").slice(0, 40);
   return path.join(CACHE_DIR, `${hash}.mp4`);
 }
 
