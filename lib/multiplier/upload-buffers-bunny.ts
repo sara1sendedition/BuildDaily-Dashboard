@@ -1,4 +1,5 @@
 import { storage } from "@/lib/storage/bunny-adapter";
+import { ensureMp4FaststartBuffer } from "@/lib/ffmpeg";
 
 /** Upload raw buffers to Bunny Storage; returns public CDN URLs. */
 export async function uploadBuffersToBunnyStorage(
@@ -47,6 +48,10 @@ export async function uploadFileBufferToBunnyStorage(
     contentType: string;
   },
 ): Promise<string> {
+  const isMp4 =
+    opts.contentType === "video/mp4" ||
+    opts.filename.toLowerCase().endsWith(".mp4");
+  const body = isMp4 ? await ensureMp4FaststartBuffer(buffer) : buffer;
   const token = await storage.createUploadToken({
     kind: "thumbnail",
     userId: opts.userId,
@@ -59,7 +64,7 @@ export async function uploadFileBufferToBunnyStorage(
       ...token.headers,
       "Content-Type": opts.contentType,
     },
-    body: new Uint8Array(buffer),
+    body: new Uint8Array(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");

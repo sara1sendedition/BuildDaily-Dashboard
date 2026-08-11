@@ -1,5 +1,6 @@
 import { execFile } from "child_process";
 import { existsSync } from "fs";
+import { tmpdir } from "os";
 import { promisify } from "util";
 import * as fs from "fs/promises";
 import * as path from "path";
@@ -186,6 +187,50 @@ export async function extractAudioMp3(
     outPath,
   ]);
   return outPath;
+}
+
+/**
+ * Remux an MP4 so the moov atom is at the front (`+faststart`). Required for
+ * reliable iOS Safari progressive playback of CDN-hosted Shorts.
+ */
+export async function remuxMp4Faststart(
+  inputPath: string,
+  outputPath: string,
+): Promise<void> {
+  await execBinary("ffmpeg", [
+    "-y",
+    "-i",
+    inputPath,
+    "-c",
+    "copy",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ]);
+}
+
+/** Remux a buffer in a temp dir; returns the faststart buffer (or original on failure). */
+export async function ensureMp4FaststartBuffer(
+  buffer: Buffer,
+): Promise<Buffer> {
+  const workDir = path.join(
+    tmpdir(),
+    `mp4-faststart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  const inPath = path.join(workDir, "in.mp4");
+  const outPath = path.join(workDir, "out.mp4");
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    await fs.writeFile(inPath, buffer);
+    await remuxMp4Faststart(inPath, outPath);
+    const out = await fs.readFile(outPath);
+    if (out.length > 0) return out;
+  } catch {
+    // Fall through — better to upload the original than fail the job.
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+  return buffer;
 }
 
 export type FrameDimensions = { width: number; height: number };

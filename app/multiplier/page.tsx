@@ -21,6 +21,7 @@ import {
   postMetaReelPublish,
 } from "@/lib/meta/publish-meta-client";
 import { postYoutubeShortPublish } from "@/lib/youtube/publish-youtube-client";
+import { mobileFriendlyMp4PreviewUrl } from "@/lib/media/mobile-friendly-mp4-preview-url";
 import { slidesForMetaFromZipOrSnapshot } from "@/lib/schedule/slides-for-meta-from-snapshot";
 import {
   getCarouselFocusFromStorage,
@@ -486,7 +487,7 @@ export default function Home() {
       setShortPreviewUrl(null);
       return;
     }
-    if (shortOutputFile) {
+    if (shortOutputFile && shortOutputFile.size > 0) {
       const url = URL.createObjectURL(shortOutputFile);
       setShortPreviewUrl(url);
       return () => {
@@ -495,7 +496,7 @@ export default function Home() {
     }
     const remote = reelMp4Url?.trim();
     if (remote) {
-      setShortPreviewUrl(remote);
+      setShortPreviewUrl(mobileFriendlyMp4PreviewUrl(remote));
       return;
     }
     const jobId = shortJobId?.trim();
@@ -1732,11 +1733,12 @@ export default function Home() {
                       {shortPreviewUrl ? (
                         <video
                           key={shortPreviewUrl}
-                          src={shortPreviewUrl}
                           controls
                           playsInline
+                          preload="metadata"
                           className={`mx-auto max-h-[min(52vh,520px)] w-full max-w-lg rounded-xl border border-stone-200 bg-black object-contain shadow-inner ${shortReprocessBusy ? "pointer-events-none opacity-60" : ""}`}
                         >
+                          <source src={shortPreviewUrl} type="video/mp4" />
                           Your browser does not support embedded video.
                         </video>
                       ) : shortJobId || shortError ? (
