@@ -35,11 +35,14 @@ export async function GET(
   }
 
   const base = getVideoToShortApiBaseUrl();
+  // Forward Range so upstream can answer 206; without it <video> seek/play
+  // breaks and edge proxies may gzip a full 200 MP4 body.
+  const range = _req.headers.get("range");
   let upstream: Response;
   try {
     upstream = await fetch(
       `${base}/api/jobs/${encodeURIComponent(jobId)}/download`,
-      { cache: "no-store" }
+      { cache: "no-store", headers: range ? { Range: range } : undefined }
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
@@ -63,11 +66,17 @@ export async function GET(
   }
 
   const headers = new Headers();
-  const cd = upstream.headers.get("content-disposition");
-  if (cd) headers.set("Content-Disposition", cd);
-  const ct = upstream.headers.get("content-type");
-  if (ct) headers.set("Content-Type", ct);
-  headers.set("Cache-Control", "no-store");
+  for (const h of [
+    "content-type",
+    "content-disposition",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+  ]) {
+    const v = upstream.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  headers.set("Cache-Control", "no-store, no-transform");
 
   return new NextResponse(upstream.body, {
     status: upstream.status,

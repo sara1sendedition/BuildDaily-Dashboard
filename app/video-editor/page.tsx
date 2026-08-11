@@ -375,15 +375,21 @@ export default function VideoEditorPage() {
       setShortPreviewUrl(null);
       return;
     }
+    const remote = reelMp4Url?.trim();
+    if (shortJobPreviewEligible && shortJobId && shortReprocessBusy) {
+      setShortPreviewUrl(shortJobDownloadApiUrl(shortJobId));
+      return;
+    }
+    // Prefer Bunny CDN (faststart proxy) over local blobs — local MP4s often
+    // still have moov-at-end and fail on iPhone Safari even when size > 0.
+    if (remote) {
+      setShortPreviewUrl(mobileFriendlyMp4PreviewUrl(remote));
+      return;
+    }
     if (shortOutputFile && shortOutputFile.size > 0) {
       const url = URL.createObjectURL(shortOutputFile);
       setShortPreviewUrl(url);
       return () => URL.revokeObjectURL(url);
-    }
-    const remote = reelMp4Url?.trim();
-    if (remote) {
-      setShortPreviewUrl(mobileFriendlyMp4PreviewUrl(remote));
-      return;
     }
     if (shortJobPreviewEligible && shortJobId) {
       setShortPreviewUrl(shortJobDownloadApiUrl(shortJobId));
@@ -396,6 +402,7 @@ export default function VideoEditorPage() {
     reelMp4Url,
     shortJobPreviewEligible,
     shortJobId,
+    shortReprocessBusy,
   ]);
 
   const downloadShortMp4 = useCallback(() => {

@@ -31,6 +31,8 @@ export function ShortPreviewPlayer({
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
+    /** Only revoke URLs we created — never parent-owned `blob:` props. */
+    let ownsObjectUrl = false;
 
     async function prepare() {
       setLoading(true);
@@ -45,7 +47,7 @@ export function ShortPreviewPlayer({
         return;
       }
 
-      // Local blobs are already playable — do not re-fetch.
+      // Local blobs are already playable — do not re-fetch or revoke.
       if (raw.startsWith("blob:")) {
         if (!cancelled) {
           setSrc(raw);
@@ -82,9 +84,11 @@ export function ShortPreviewPlayer({
             ? blob
             : new Blob([blob], { type: "video/mp4" }),
         );
+        ownsObjectUrl = true;
         if (cancelled) {
           URL.revokeObjectURL(objectUrl);
           objectUrl = null;
+          ownsObjectUrl = false;
           return;
         }
         setSrc(objectUrl);
@@ -101,7 +105,7 @@ export function ShortPreviewPlayer({
     void prepare();
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (ownsObjectUrl && objectUrl) URL.revokeObjectURL(objectUrl);
     };
     // Intentionally only re-fetch when `url` changes; callbacks are latest via closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -140,7 +144,7 @@ export function ShortPreviewPlayer({
           </div>
         ) : null}
 
-        {src ? (
+        {src && !error ? (
           <video
             key={src}
             src={src}
@@ -151,9 +155,15 @@ export function ShortPreviewPlayer({
             onLoadedMetadata={(e) => {
               const d = e.currentTarget.duration;
               if (Number.isFinite(d) && d > 0) onDurationSec?.(d);
-              else onMediaError?.();
+              else {
+                setError("Could not read video duration.");
+                onMediaError?.();
+              }
             }}
-            onError={() => onMediaError?.()}
+            onError={() => {
+              setError("This device could not play the preview.");
+              onMediaError?.();
+            }}
           />
         ) : null}
       </div>

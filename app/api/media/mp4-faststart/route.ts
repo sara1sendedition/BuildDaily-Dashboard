@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { existsSync } from "fs";
 import * as fs from "fs/promises";
 import * as path from "path";
@@ -13,6 +13,9 @@ export const maxDuration = 180;
 
 const CACHE_DIR = path.join(tmpdir(), "builddaily-mp4-faststart");
 
+/** One remux per source URL per process — avoids corrupt overlapping writes. */
+const inflightRemux = new Map<string, Promise<void>>();
+
 function cachePathForUrl(url: string): string {
   const hash = createHash("sha256").update(url).digest("hex").slice(0, 40);
   return path.join(CACHE_DIR, `${hash}.mp4`);
@@ -22,14 +25,66 @@ function videoHeaders(extra: Record<string, string> = {}): Headers {
   // `no-transform` is required: edge proxies (Coolify/nginx) otherwise gzip the
   // MP4 body on 200 responses, which breaks <video> playback (black frame, play
   // does nothing). Same pattern as /api/video-to-short/jobs/.../download.
-  const headers = new Headers({
+  return new Headers({
     "Content-Type": "video/mp4",
     "Accept-Ranges": "bytes",
     "Cache-Control": "private, max-age=3600, no-transform",
     "X-Content-Type-Options": "nosniff",
     ...extra,
   });
-  return headers;
+}
+
+async function ensureFaststartFile(raw: string, outPath: string): Promise<void> {
+  let ready = existsSync(outPath);
+  if (ready) {
+    const st = await fs.stat(outPath);
+    if (st.size === 0) ready = false;
+  }
+  if (ready) return;
+
+  let pending = inflightRemux.get(outPath);
+  if (!pending) {
+    pending = (async () => {
+      // Re-check after awaiting the lock winner.
+      if (existsSync(outPath)) {
+        const st = await fs.stat(outPath);
+        if (st.size > 0) return;
+      }
+      const id = randomUUID();
+      const inPath = `${outPath}.${id}.src`;
+      const tmpOut = `${outPath}.${id}.tmp`;
+      try {
+        const res = await fetch(raw, { cache: "no-store" });
+        if (!res.ok) {
+          throw new Error(`Could not fetch source video (${res.status}).`);
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length === 0) {
+          throw new Error("Source video was empty.");
+        }
+        await fs.writeFile(inPath, buf);
+        await remuxMp4Faststart(inPath, tmpOut);
+        const st = await fs.stat(tmpOut);
+        if (st.size === 0) {
+          throw new Error("Faststart remux produced an empty file.");
+        }
+        // Atomic replace when possible; if another worker already published,
+        // keep the existing good file.
+        if (existsSync(outPath)) {
+          const existing = await fs.stat(outPath);
+          if (existing.size > 0) return;
+        }
+        await fs.rename(tmpOut, outPath);
+      } finally {
+        await fs.unlink(inPath).catch(() => undefined);
+        await fs.unlink(tmpOut).catch(() => undefined);
+      }
+    })().finally(() => {
+      inflightRemux.delete(outPath);
+    });
+    inflightRemux.set(outPath, pending);
+  }
+  await pending;
 }
 
 /**
@@ -56,42 +111,18 @@ export async function GET(request: Request) {
   const outPath = cachePathForUrl(raw);
   try {
     await fs.mkdir(CACHE_DIR, { recursive: true });
-    let ready = existsSync(outPath);
-    if (ready) {
-      const st = await fs.stat(outPath);
-      if (st.size === 0) ready = false;
-    }
-    if (!ready) {
-      const inPath = `${outPath}.src`;
-      const tmpOut = `${outPath}.tmp`;
-      try {
-        const res = await fetch(raw, { cache: "no-store" });
-        if (!res.ok) {
-          return NextResponse.json(
-            { error: `Could not fetch source video (${res.status}).` },
-            { status: 502 },
-          );
-        }
-        const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length === 0) {
-          return NextResponse.json(
-            { error: "Source video was empty." },
-            { status: 502 },
-          );
-        }
-        await fs.writeFile(inPath, buf);
-        await remuxMp4Faststart(inPath, tmpOut);
-        await fs.rename(tmpOut, outPath);
-      } finally {
-        await fs.unlink(inPath).catch(() => undefined);
-        await fs.unlink(tmpOut).catch(() => undefined);
-      }
-    }
+    await ensureFaststartFile(raw, outPath);
 
     // Buffer-based Range responses (not Node streams) so iOS Safari seek/play
     // works reliably through Next.js.
     const file = await fs.readFile(outPath);
     const size = file.byteLength;
+    if (size === 0) {
+      return NextResponse.json(
+        { error: "Prepared preview file was empty." },
+        { status: 502 },
+      );
+    }
     const range = request.headers.get("range");
     if (range) {
       const m = /^bytes=(\d*)-(\d*)$/i.exec(range.trim());

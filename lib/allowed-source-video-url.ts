@@ -2,14 +2,13 @@
  * Hostnames we may fetch for `sourceVideoUrl` / mp4-faststart (SSRF guard).
  * Override with BUNNY_SOURCE_VIDEO_FETCH_HOSTS (comma-separated) in env.
  *
- * Includes `builddaily.app` so custom Bunny pull zones like `cdn.builddaily.app`
- * match the same hosts the client preview helper already treats as Bunny CDN.
+ * `builddaily.app` is intentionally NOT a blanket allow — only configured pull
+ * zones and explicit env hosts, plus Bunny defaults. Matches the client preview
+ * helper’s CDN host rules for custom zones (cdn/media/storage).
  */
-const DEFAULT_ALLOWED_HOSTS = [
-  "b-cdn.net",
-  "storage.bunnycdn.com",
-  "builddaily.app",
-];
+const DEFAULT_ALLOWED_HOSTS = ["b-cdn.net", "storage.bunnycdn.com"];
+
+const BUILDDAILY_MEDIA_PREFIXES = ["cdn.", "media.", "storage.", "vz-"];
 
 function hostnameFromEnv(value: string | undefined): string | undefined {
   const raw = value?.trim();
@@ -44,6 +43,12 @@ function hostMatchesAllowed(hostname: string, allowed: string): boolean {
   return h === a || h.endsWith(`.${a}`);
 }
 
+function isBuildDailyMediaHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (!(h === "builddaily.app" || h.endsWith(".builddaily.app"))) return false;
+  return BUILDDAILY_MEDIA_PREFIXES.some((p) => h.startsWith(p));
+}
+
 /** True when the URL is safe to fetch server-side (HTTPS Bunny CDN / configured hosts). */
 export function isAllowedSourceVideoUrl(url: string): boolean {
   let parsed: URL;
@@ -53,10 +58,12 @@ export function isAllowedSourceVideoUrl(url: string): boolean {
     return false;
   }
   if (parsed.protocol !== "https:") return false;
+  const host = parsed.hostname.toLowerCase();
+  if (isBuildDailyMediaHost(host)) return true;
   const hosts = [
     ...DEFAULT_ALLOWED_HOSTS,
     ...configuredBunnyPullHosts(),
     ...extraAllowedHosts(),
   ];
-  return hosts.some((allowed) => hostMatchesAllowed(parsed.hostname, allowed));
+  return hosts.some((allowed) => hostMatchesAllowed(host, allowed));
 }
