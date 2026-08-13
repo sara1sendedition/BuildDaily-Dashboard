@@ -111,3 +111,88 @@ export function anyOutputReadyToSchedule(
 ): boolean {
   return MULTIPLIER_OUTPUT_KEYS.some((k) => outputReadyToSchedule(outputs, k));
 }
+
+export type BunnyUrlsHint = {
+  slideUrls?: unknown;
+  slideUrlsInstagram?: unknown;
+  imagePostUrl?: unknown;
+  reelMp4Url?: unknown;
+};
+
+function hasOutputRecords(
+  outputs: MultiplierOutputsState | undefined,
+): outputs is MultiplierOutputsState {
+  return Boolean(
+    outputs && MULTIPLIER_OUTPUT_KEYS.some((k) => Boolean(outputs[k])),
+  );
+}
+
+/** True when at least one generated asset exists (outputs or CDN URLs). */
+export function hasSucceededMultiplierOutput(
+  outputs: MultiplierOutputsState | undefined,
+  bunnyUrls?: BunnyUrlsHint,
+): boolean {
+  if (
+    hasOutputRecords(outputs) &&
+    MULTIPLIER_OUTPUT_KEYS.some((k) => outputs[k]?.status === "done")
+  ) {
+    return true;
+  }
+  const slides = bunnyUrls?.slideUrls;
+  const slidesIg = bunnyUrls?.slideUrlsInstagram;
+  return (
+    (Array.isArray(slides) && slides.length > 0) ||
+    (Array.isArray(slidesIg) && slidesIg.length > 0) ||
+    (typeof bunnyUrls?.imagePostUrl === "string" &&
+      Boolean(bunnyUrls.imagePostUrl.trim())) ||
+    (typeof bunnyUrls?.reelMp4Url === "string" &&
+      Boolean(bunnyUrls.reelMp4Url.trim()))
+  );
+}
+
+/**
+ * Local queue badge for a Hub row. A failed Short must not mark the whole
+ * video as Error when carousel/photo (or CDN assets) succeeded.
+ */
+export function localQueueStatusFromHub(opts: {
+  hubStatus: string;
+  outputs?: MultiplierOutputsState;
+  bunnyUrls?: BunnyUrlsHint;
+  interrupted?: boolean;
+  canResume?: boolean;
+}): "pending" | "processing" | "done" | "error" {
+  if (opts.canResume) return "pending";
+  if (opts.interrupted) return "error";
+  const agg = hasOutputRecords(opts.outputs)
+    ? aggregateQueueStatusFromOutputs(opts.outputs)
+    : null;
+  if (agg === "processing") return "processing";
+  if (
+    agg === "done" ||
+    hasSucceededMultiplierOutput(opts.outputs, opts.bunnyUrls)
+  ) {
+    return "done";
+  }
+  if (agg === "failed" || opts.hubStatus === "failed") return "error";
+  if (opts.hubStatus === "processing") return "processing";
+  return "done";
+}
+
+/** First failed-output message for queue cards (Short vs carousel vs photo). */
+export function failedOutputSummary(
+  outputs: MultiplierOutputsState | undefined,
+): string | undefined {
+  if (!outputs) return undefined;
+  const labels: Record<MultiplierOutputKey, string> = {
+    carousel: "Carousel",
+    photo: "Image",
+    short: "Short",
+  };
+  for (const key of MULTIPLIER_OUTPUT_KEYS) {
+    const o = outputs[key];
+    if (o?.status !== "failed") continue;
+    const err = typeof o.error === "string" ? o.error.trim() : "";
+    return err ? `${labels[key]}: ${err}` : `${labels[key]} failed.`;
+  }
+  return undefined;
+}

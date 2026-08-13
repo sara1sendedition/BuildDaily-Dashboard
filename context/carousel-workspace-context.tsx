@@ -78,6 +78,11 @@ import {
   type MultiplierQueuePayload,
   type ImagePostCopyPayload,
 } from "@/lib/multiplier-queue/hub-client";
+import {
+  failedOutputSummary,
+  localQueueStatusFromHub,
+  type MultiplierOutputsState,
+} from "@/lib/multiplier-queue/output-state";
 import { queueItemScheduleLabel } from "@/lib/queue-display-label";
 import { parseResponseJson } from "@/lib/parse-response-json";
 import {
@@ -335,6 +340,8 @@ export type VideoQueueItem = {
   shortEditorialCuts?: unknown | null;
   /** Set when Reel was requested but failed or was skipped (carousel may still be done). */
   shortError?: string;
+  /** Per-output process + ready-to-schedule state (from Hub payload). */
+  outputs?: MultiplierOutputsState;
 };
 
 /** Single-frame 4:5 Instagram image post from the same video as the carousel. */
@@ -1793,35 +1800,34 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                 reelShort: payload.studioOutputs.reelShort,
               }
             : undefined;
+        const queueStatus = localQueueStatusFromHub({
+          hubStatus: item.status,
+          outputs: payloadOutputs,
+          bunnyUrls: payload.bunnyUrls,
+          interrupted: interruptedProcessing,
+        });
         newQueueRows.push({
           id: item.id,
           file: stubFile,
-          status:
-            item.status === "failed" || interruptedProcessing
-              ? "error"
-              : item.status,
+          status: queueStatus,
           ...(payloadShortJobId ? { shortJobId: payloadShortJobId } : {}),
           ...(payloadShortError ? { shortError: payloadShortError } : {}),
+          ...(payloadOutputs ? { outputs: payloadOutputs } : {}),
           ...(payloadStudioOutputs
             ? { studioOutputs: payloadStudioOutputs }
             : {}),
-          ...(interruptedProcessing
+          ...(queueStatus === "error"
             ? {
-                error:
-                  "Processing was interrupted. Re-upload your video or return from Stitch to continue.",
-              }
-            : item.status === "failed"
-              ? {
-                  error:
-                    (typeof payload.error === "string" && payload.error.trim()
+                error: interruptedProcessing
+                  ? "Processing was interrupted. Re-upload your video or return from Stitch to continue."
+                  : (typeof payload.error === "string" && payload.error.trim()
                       ? payload.error.trim()
                       : undefined) ||
                     payloadShortError ||
-                    payloadOutputs?.carousel?.error ||
-                    payloadOutputs?.photo?.error ||
+                    failedOutputSummary(payloadOutputs) ||
                     "Processing failed.",
-                }
-              : {}),
+              }
+            : {}),
         });
         const snap: QueueCarouselSnapshot = {
           recommendation: null,

@@ -14,6 +14,7 @@ import { FrameColorAdjustSliders } from "@/app/components/FrameColorAdjustSlider
 import { useCarouselWorkspace } from "@/context/carousel-workspace-context";
 import { useScheduleStore } from "@/context/schedule-context";
 import { QueueItemEditableTitle } from "@/app/components/QueueItemEditableTitle";
+import { QueueItemOutputPills } from "@/app/components/QueueItemOutputPills";
 import { clientApiPath } from "@/lib/client-api-path";
 import { frameColorAdjustToCssFilter } from "@/lib/frame-color-adjust";
 import {
@@ -1287,6 +1288,17 @@ export default function Home() {
                           ) : null}
                         </div>
                       </div>
+                      <QueueItemOutputPills item={item} />
+                      {item.status === "error" &&
+                      (item.error || item.shortError) ? (
+                        <p className="max-w-full whitespace-pre-wrap break-words text-[11px] leading-snug text-red-800">
+                          {item.error || item.shortError}
+                        </p>
+                      ) : item.shortError ? (
+                        <p className="max-w-full whitespace-pre-wrap break-words text-[11px] leading-snug text-amber-900">
+                          {item.shortError}
+                        </p>
+                      ) : null}
                       {item.status === "processing" ? (
                         <button
                           type="button"

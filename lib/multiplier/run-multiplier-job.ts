@@ -887,7 +887,6 @@ export async function runMultiplierProcessingJob(opts: {
           ? withOutput("short", { status: "failed", error: message })
           : {}),
       }),
-      status: "failed",
     }).catch(() => undefined);
     return { ok: false, error: message };
   } finally {
