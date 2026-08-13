@@ -42,12 +42,6 @@ export function FrameColorAdjustSliders({
 
   return (
     <div className="space-y-4 text-sm text-stone-700">
-      <p className="text-xs leading-relaxed text-stone-500">
-        The preview above updates live (CSS).{" "}
-        <strong className="font-medium text-stone-700">Rebuild / Apply</strong>{" "}
-        bakes the same settings into the PNG with FFmpeg (can differ slightly).
-        Neutral = no change.
-      </p>
       <div>
         <label
           htmlFor={`${idPrefix}-brightness`}

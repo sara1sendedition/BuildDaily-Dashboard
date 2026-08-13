@@ -1,5 +1,6 @@
 "use client";
 
+import { DismissableHint } from "@/app/components/DismissableHint";
 import type { StoryTrackHubSummary } from "@/lib/hub/types";
 
 type Props = {
@@ -20,13 +21,14 @@ export function VideoStudioPanel({ summary, linked, storytrackBaseUrl }: Props) 
           <h2 className="font-serif text-xl font-semibold text-[var(--bd-ink)]">
             Video Studio
           </h2>
-          <p className="mt-2 text-sm text-stone-600">
-            Record Build in Public segments with a teleprompter, stitch your daily
-            video, and build your streak.
-          </p>
+          <DismissableHint id="video-studio-unlinked" className="mt-2">
+            <p className="text-sm text-stone-600">
+              Record Build in Public segments with a teleprompter, stitch your daily
+              video, and build your streak.
+            </p>
+          </DismissableHint>
           <p className="text-sm text-stone-500 mb-3 mt-6">
-            Open Video Studio to start your streak. Link your account in Clerk metadata
-            (`storytrackUserId`) to see stats here.
+            Open Video Studio to start your streak.
           </p>
           <a
             href={storytrackBaseUrl}

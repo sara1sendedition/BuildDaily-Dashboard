@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { useCarouselWorkspace } from "@/context/carousel-workspace-context";
+import { DismissableHint } from "@/app/components/DismissableHint";
 
 function CopyTextButton({
   label,
@@ -86,10 +87,11 @@ export function SocialMicroPanel() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
+          <DismissableHint id="social-micro-intro">
           <p className="text-sm text-stone-600">
-            Draft copy from your transcript only (no auto-post). X: threaded,
-            debate-style hooks. Threads: warmer, 2–4 posts with light topic tags.
+            Drafts are not posted automatically.
           </p>
+          </DismissableHint>
         </div>
         <button
           type="button"

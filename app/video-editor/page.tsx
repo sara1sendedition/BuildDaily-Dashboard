@@ -9,6 +9,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { QueueItemEditableTitle } from "@/app/components/QueueItemEditableTitle";
 import { DriveInboxPanel } from "@/app/components/DriveInboxPanel";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import { ShortEditPanel } from "@/app/components/ShortEditPanel";
 import { ShortPreviewPlayer } from "@/app/components/ShortPreviewPlayer";
 import { mobileFriendlyMp4PreviewUrl } from "@/lib/media/mobile-friendly-mp4-preview-url";
@@ -152,20 +153,19 @@ export default function VideoEditorPage() {
         if (cancelled) return;
         if (data.clientSkipsShort) {
           setVideoToShortWarning(
-            "NEXT_PUBLIC_SKIP_VIDEO_TO_SHORT is set, so Short processing is skipped."
+            "Short video processing is skipped here — the original upload is used instead."
           );
           return;
         }
         if (data.integrationEnabled === false) {
           setVideoToShortWarning(
-            "Video to Short integration is turned off (VIDEO_TO_SHORT_INTEGRATION)."
+            "Short video processing is turned off."
           );
           return;
         }
         if (data.backendReachable === false) {
-          const where = data.apiBase?.trim() || "the configured URL";
           setVideoToShortWarning(
-            `The Video to Short backend does not appear to be running (could not reach ${where}).`
+            "The Short video service isn't running."
           );
           return;
         }
@@ -435,17 +435,18 @@ export default function VideoEditorPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
           Video Editor
         </h1>
-        <p className="mt-2 max-w-2xl text-sm text-stone-600">
-          Turn a video into a captioned short — without carousel, image post, or
-          other Multiplier formats. Upload a finished take, or{" "}
-          <Link
-            href="/stitch?to=editor"
-            className="font-medium text-palette-depth underline decoration-palette-depth/30 underline-offset-2 hover:text-stone-900"
-          >
-            combine clips in Stitch
-          </Link>{" "}
-          first.
-        </p>
+        <DismissableHint id="video-editor-subtitle">
+          <p className="mt-2 max-w-2xl text-sm text-stone-600">
+            Turn a video into a captioned short. Upload a finished take, or{" "}
+            <Link
+              href="/stitch?to=editor"
+              className="font-medium text-palette-depth underline decoration-palette-depth/30 underline-offset-2 hover:text-stone-900"
+            >
+              combine clips in Stitch
+            </Link>{" "}
+            first.
+          </p>
+        </DismissableHint>
       </header>
 
       {error ? (
@@ -459,7 +460,7 @@ export default function VideoEditorPage() {
           className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-relaxed text-amber-950"
           role="status"
         >
-          <span className="font-semibold">Video to Short: </span>
+          <span className="font-semibold">Short video: </span>
           {videoToShortWarning}
         </p>
       ) : null}
@@ -504,9 +505,7 @@ export default function VideoEditorPage() {
         <div className="min-w-0 space-y-3 lg:col-span-1">
           <div className="rounded-2xl border border-stone-200/80 bg-white px-4 py-3 text-sm text-stone-700 shadow-sm">
             <p className="font-semibold text-stone-900">Output</p>
-            <p className="mt-1 text-stone-600">
-              Reel / Short only — Multiplier formats stay off.
-            </p>
+            <p className="mt-1 text-stone-600">Reel / Short</p>
           </div>
 
           <details className="group rounded-2xl border border-stone-200/80 bg-white text-left shadow-sm [&_summary::-webkit-details-marker]:hidden">
@@ -702,9 +701,6 @@ export default function VideoEditorPage() {
               <p className="text-base font-medium text-stone-800">
                 {activeQueueItem?.progress ?? "Creating your short"}
               </p>
-              <p className="mt-2 max-w-md text-sm text-stone-600">
-                Running Video to Short only — no carousel or image post.
-              </p>
             </div>
           ) : !hasProcessed ? (
             <div className="flex flex-1 flex-col items-center justify-center px-2 text-center">
@@ -730,8 +726,14 @@ export default function VideoEditorPage() {
                 No short yet
               </p>
               <p className="mt-2 max-w-sm text-sm text-stone-600">
-                Upload a video to run Video to Short, or stitch clips first and
-                send them here.
+                Upload a video, or{" "}
+                <Link
+                  href="/stitch?to=editor"
+                  className="font-medium text-palette-depth underline decoration-palette-depth/30 underline-offset-2 hover:text-stone-900"
+                >
+                  combine clips in Stitch
+                </Link>{" "}
+                first.
               </p>
             </div>
           ) : (

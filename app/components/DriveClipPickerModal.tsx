@@ -247,15 +247,13 @@ export function DriveClipPickerModal({
 
           {mode === "missing-api" ? (
             <p className="mt-3 text-xs text-amber-800">
-              Drive import is not deployed on this app yet. Redeploy with the
-              latest video-to-short proxy routes.
+              Drive import isn’t available yet.
             </p>
           ) : null}
 
           {mode === "not-configured" ? (
             <p className="mt-3 text-xs text-stone-600">
-              Drive inbox is not configured on the Video to Short backend
-              (service account + shared folder).
+              Drive is not connected yet.
             </p>
           ) : null}
 

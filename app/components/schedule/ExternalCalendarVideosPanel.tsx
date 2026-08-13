@@ -46,7 +46,7 @@ function ExternalVideoRow({
       <div className="min-w-0 flex-1 text-left">
         <p className="truncate text-sm font-medium text-stone-800">{label}</p>
         <p className="mt-0.5 text-[10px] text-violet-800/80">
-          Short · edited outside Multiplier
+          Short
         </p>
       </div>
       <button

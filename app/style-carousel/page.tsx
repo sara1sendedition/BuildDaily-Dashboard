@@ -181,12 +181,7 @@ export default function StyleCarouselPage() {
               Style-match carousel
             </h1>
             <p className="mt-1 text-sm text-stone-600">
-              Upload a graphic with your text overlay, then a video. Vision infers
-              carousel primary (headline) and secondary (body / supporting line)
-              colors when they differ, plus **where the text block sits** (left /
-              center / right and vertical band), outline, shadow, letter-spacing,
-              and Poppins weights. Layout is not the fixed studio presets— it
-              follows the reference image.
+              Upload a graphic with your text overlay, then a video.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 text-sm">

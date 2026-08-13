@@ -196,17 +196,13 @@ export default function RefinePage() {
                   >
                     {reRenderLoading
                       ? "Updating…"
-                      : "Bake color into slide PNGs (ZIP)"}
+                      : "Apply color to slides"}
                   </button>
                 </CollapsibleSection>
               </div>
               {recommendation !== null ? (
                 <div className="mt-6">
                   <CollapsibleSection title="Post caption" defaultOpen={false}>
-                    <p className="text-left text-[11px] leading-snug text-stone-500">
-                      AI draft for Instagram/Facebook (Know / Like / Trust).
-                      Edit before publishing.
-                    </p>
                     <label
                       htmlFor={carouselSocialCaptionFieldId}
                       className="sr-only"

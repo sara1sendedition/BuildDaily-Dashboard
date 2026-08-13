@@ -68,7 +68,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error:
-          "Meta is not configured. Set META_PAGE_ACCESS_TOKEN and META_PAGE_ID in .env.local.",
+          "Instagram and Facebook are not connected. Open Settings to connect them.",
       },
       { status: 503 }
     );

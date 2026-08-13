@@ -20,6 +20,7 @@ import { useUser, UserButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useState } from "react";
 import { ContentMultiplierHomeLink } from "@/app/components/ContentMultiplierMark";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import {
   getDefaultFirstCommentFromStorage,
   MAX_DEFAULT_FIRST_COMMENT_CHARS,
@@ -185,10 +186,6 @@ function AccountSection({
   return (
     <section className={cardClass}>
       <h2 className="text-lg font-semibold text-stone-900">Account</h2>
-      <p className="mt-1 text-sm text-stone-600">
-        One login for every BuildDaily app. Manage your name, email, avatar, and
-        password from here.
-      </p>
       <div className="mt-4 flex items-center gap-3">
         <UserButton />
         <div className="text-sm">
@@ -248,10 +245,12 @@ function BrandSection({
         <h2 className="text-lg font-semibold text-stone-900">Brand & business</h2>
         <SaveStatus state={status} />
       </div>
-      <p className="mt-1 text-sm text-stone-600">
-        Entered once here, used everywhere — captions, slides, replies all pull
-        from this.
-      </p>
+      <DismissableHint id="settings-brand-intro">
+        <p className="mt-1 text-sm text-stone-600">
+          Entered once here, used everywhere — captions, slides, replies all pull
+          from this.
+        </p>
+      </DismissableHint>
 
       <div className="mt-5 space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
@@ -422,10 +421,12 @@ function PersonasSection({ brandId }: { brandId: string }) {
 
   return (
     <CollapsibleSection title="Audience">
-      <p className="text-sm text-stone-600">
-        Who you serve, how they talk, what they struggle with. Add as many
-        personas as you need.
-      </p>
+      {personas.length === 0 && !loading ? (
+        <p className="text-sm text-stone-600">
+          Who you serve, how they talk, what they struggle with. Add as many
+          personas as you need.
+        </p>
+      ) : null}
 
       {loading ? (
         <p className="mt-3 text-sm text-stone-500">Loading…</p>
@@ -587,10 +588,12 @@ function ProductsSection({ brandId }: { brandId: string }) {
 
   return (
     <CollapsibleSection title="Products & offers">
-      <p className="text-sm text-stone-600">
-        Your offers, links, and CTAs. Comment Convert and the Multiplier use
-        these so replies and captions point people to the right thing.
-      </p>
+      {products.length === 0 && !loading ? (
+        <p className="text-sm text-stone-600">
+          Your offers, links, and CTAs — used so replies and captions point
+          people to the right thing.
+        </p>
+      ) : null}
 
       {loading ? (
         <p className="mt-3 text-sm text-stone-500">Loading…</p>
@@ -877,9 +880,8 @@ function ConnectionsSection() {
           className="font-medium text-palette-depth underline"
         >
           Connect in Video Studio
-        </a>{" "}
-        — it shares this same list. (One-click connect moves here in the next
-        pass.)
+        </a>
+        — it shares this same list.
       </p>
     </section>
   );
@@ -992,10 +994,6 @@ function CopyDefaultsSection({
               }}
             />
           </Field>
-          <p className="mt-1 text-xs text-stone-400">
-            Saved on this device for now — moving into your account in the next
-            pass.
-          </p>
         </div>
       </div>
     </section>
@@ -1154,10 +1152,12 @@ function CommentsSection() {
         <h2 className="text-lg font-semibold text-stone-900">Comments</h2>
         <SaveStatus state={status} />
       </div>
-      <p className="mt-1 text-sm text-stone-600">
-        How Comment Convert handles your incoming comments and learns your reply
-        voice.
-      </p>
+      <DismissableHint id="settings-comments-intro">
+        <p className="mt-1 text-sm text-stone-600">
+          How Comment Convert handles your incoming comments and learns your reply
+          voice.
+        </p>
+      </DismissableHint>
 
       {loading ? (
         <p className="mt-4 text-sm text-stone-500">Loading…</p>

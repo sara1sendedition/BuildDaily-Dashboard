@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { ContentMultiplierHomeLink } from "@/app/components/ContentMultiplierMark";
 import { FrameToneReviewCard } from "@/app/components/FrameToneReviewCard";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_COPY_CONTEXT_CHARS, getCopyContextFromStorage } from "@/lib/copy-context";
 import { MAX_COPY_FEEDBACK_CHARS, getCopyFeedbackFromStorage } from "@/lib/copy-feedback";
@@ -579,9 +580,6 @@ export default function Home() {
                   Choose file(s)
                 </label>
               )}
-              <p className="max-w-full text-center text-xs text-stone-500">
-                Add videos to the queue; click a card to view that post.
-              </p>
             </div>
 
             {queue.length > 0 ? (
@@ -784,10 +782,12 @@ export default function Home() {
                 <p className="mt-2 text-sm leading-relaxed text-stone-700">
                   {result.altText}
                 </p>
+                <DismissableHint id="image-post-alt-paste">
                 <p className="mt-2 text-xs text-stone-500">
                   Paste into the post&apos;s Accessibility → Alt text field when
                   you publish.
                 </p>
+                </DismissableHint>
               </div>
 
               <div className="flex justify-center pt-2">
@@ -825,10 +825,6 @@ export default function Home() {
             >
               Edit text
             </h2>
-            <p className="mt-1 text-sm text-stone-600">
-              Change the hook and subline on the image and the caption below.
-              Updating the image reuses your video at the same frame time.
-            </p>
             <p className="mt-2 rounded-lg bg-stone-50 px-3 py-2 text-xs leading-relaxed text-stone-600">
               Changing <strong className="font-medium text-stone-800">only</strong>{" "}
               the caption updates the caption card below the preview, not the

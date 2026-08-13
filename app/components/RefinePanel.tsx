@@ -8,6 +8,7 @@ import {
 } from "@/context/carousel-workspace-context";
 import type { CarouselType, LayoutId } from "@/lib/types";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
+import { DismissableHint } from "@/app/components/DismissableHint";
 
 type FolderTab = "design" | "copy";
 
@@ -119,9 +120,11 @@ export function RefinePanel({
         >
           {editableSlides.length > 0 ? (
             <div>
+              <DismissableHint id="carousel-reorder-hint">
               <p className="mb-4 text-xs text-stone-500">
                 Drag the handle or use the arrows to reorder slides.
               </p>
+              </DismissableHint>
               <div className="space-y-6">
                 {editableSlides.map((s, i) => (
                   <div
@@ -374,8 +377,7 @@ export function RefinePanel({
                         Background image
                       </label>
                       <p className="mt-1 text-xs text-stone-600">
-                        PNG, JPEG, or WebP. Re-choose when re-rendering to keep
-                        it.
+                        Re-choose when you rebuild to keep it.
                       </p>
                       <input
                         id="carousel-background-refine"

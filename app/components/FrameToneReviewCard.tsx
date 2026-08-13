@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { DismissableHint } from "@/app/components/DismissableHint";
 
 export type FrameToneReviewVariant = "carousel" | "image";
 
@@ -41,18 +42,20 @@ export function FrameToneReviewCard({
       <h3 id={titleId} className="text-sm font-semibold text-stone-900">
         {isImage ? "Preview image" : "Preview first slide"}
       </h3>
+      <DismissableHint id={`frame-tone-${variant}`}>
       <p className="mt-1 text-xs leading-relaxed text-stone-600">
         {isImage
-          ? "Background is a direct frame from your video (or uploaded still), scaled to 4:5. Optional color tweaks live under the main preview. Adjust copy in "
-          : "Backgrounds are direct video frames, scaled and cropped. Optional color under the preview. Edit text in "}
+          ? "Optional color tweaks live under the main preview. Adjust copy in "
+          : "Optional color under the preview. Edit text in "}
         <Link
           href="/settings"
           className="font-medium text-palette-depth underline decoration-palette-depth/35 underline-offset-2 hover:text-stone-900"
         >
           Settings
         </Link>
-        {isImage ? ", then rebuild if the hook or layout needs a refresh." : ", then rebuild all slide PNGs when you are ready."}
+        {isImage ? ", then rebuild if the hook needs a refresh." : ", then rebuild when you are ready."}
       </p>
+      </DismissableHint>
       <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative h-28 w-28 shrink-0 overflow-hidden rounded-lg border border-stone-200 bg-stone-100 shadow-inner">
           <div

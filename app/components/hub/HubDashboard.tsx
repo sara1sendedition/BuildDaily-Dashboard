@@ -163,8 +163,7 @@ export function HubDashboard() {
       },
       {
         title: "Video Editor",
-        subtitle:
-          "Upload or stitch a video into a captioned short — without multiplying into other formats.",
+        subtitle: "Captioned short from one video.",
         statLine: "Short only",
         nudge: "Edit a reel without the full multiply set",
         href: "/video-editor",
@@ -188,9 +187,9 @@ export function HubDashboard() {
       },
       {
         title: "Comment Converter",
-        subtitle: "Reply and capture video ideas & product feedback in ~10 minutes.",
+        subtitle: "Reply to comments and capture video ideas.",
         statLine: inboxUrl ? inboxStat : "— Set NEXT_PUBLIC_COMMENT_INBOX_URL",
-        nudge: "10 minutes to turn comments into customers",
+        nudge: "Open inbox",
         href: inboxUrl ?? "#",
         cta: inboxUrl ? "Open inbox" : "Configure URL",
         external: Boolean(inboxUrl),
@@ -229,9 +228,7 @@ export function HubDashboard() {
         <h1 className="font-serif text-3xl font-semibold text-[var(--bd-ink)] tracking-tight">
           BuildDaily
         </h1>
-        <p className="mt-2 text-stone-600">
-          Hi {displayName} — your creator system from blank page to scheduled posts.
-        </p>
+        <p className="mt-2 text-stone-600">Hi {displayName}</p>
       </header>
 
       <HubAggregateStats

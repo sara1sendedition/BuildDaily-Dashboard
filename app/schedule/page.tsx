@@ -4,6 +4,7 @@ import {
   ExternalCalendarVideosPanel,
   ExternalVideoPickRow,
 } from "@/app/components/schedule/ExternalCalendarVideosPanel";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   useCarouselWorkspace,
@@ -359,7 +360,12 @@ function isDaemonPublishUiEnabled(): boolean {
   );
 }
 
-type DaemonPublishBadge = { label: string; className: string; title?: string };
+type DaemonPublishBadge = {
+  label: string;
+  className: string;
+  title?: string;
+  detail?: string;
+};
 
 function daemonPublishBadge(
   it: ScheduledCarouselPost,
@@ -398,6 +404,7 @@ function daemonPublishBadge(
       label: "Error",
       className: `shrink-0 rounded font-semibold uppercase tracking-wide bg-red-200/90 text-red-950 ${size}`,
       title: row.daemonLastError,
+      detail: row.daemonLastError,
     };
   }
   if (it.publishAtUnix <= nowSec) {
@@ -433,12 +440,24 @@ function DaemonPublishStatusSpan({
   );
   if (!badge) return null;
   return (
-    <span
-      className={badge.className}
-      title={badge.title}
-      aria-label={badge.title ?? badge.label}
-    >
-      {badge.label}
+    <span className="inline-flex max-w-full min-w-0 flex-col items-start gap-0.5">
+      <span
+        className={badge.className}
+        title={badge.title}
+        aria-label={badge.title ?? badge.label}
+      >
+        {badge.label}
+      </span>
+      {badge.detail ? (
+        <span
+          className={`max-w-full whitespace-pre-wrap break-words font-medium leading-tight text-red-800 ${
+            variant === "cell" ? "text-[8px]" : "text-[11px]"
+          }`}
+          title={badge.detail}
+        >
+          {badge.detail}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -1478,10 +1497,12 @@ export default function SchedulePage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500">
             Ready to schedule
           </h2>
+          <DismissableHint id="calendar-drag-hint">
           <p className="mt-1 text-xs text-stone-500">
             Drag a video onto a day, or click + on a day, then pick carousel,
             photo, or short in the dialog.
           </p>
+          </DismissableHint>
           <ul className="mt-4 space-y-3">
             {doneQueue.length === 0 ? (
               <li className="text-sm text-stone-600">No completed videos yet.</li>
@@ -1740,11 +1761,9 @@ export default function SchedulePage() {
         )}
         {items.length > 0 && (
           <p className="mt-2 text-xs text-stone-500">
-            <span className="font-medium text-stone-700">Move</span> changes the
-            slot in this browser and on the server publish list (when the daemon
-            secret is set). Posts already{" "}
-            <span className="font-medium text-stone-700">auto-published</span>{" "}
-            (Published badge) cannot be moved here.
+            Posts already{" "}
+            <span className="font-medium text-stone-700">published</span> cannot
+            be moved here.
           </p>
         )}
         {items.length === 0 ? (
@@ -2068,7 +2087,7 @@ export default function SchedulePage() {
                   disabled={!modalShortAvailable}
                   title={
                     modalShortAvailable
-                      ? "Video to Short reel (IG Reels + optional Page video)"
+                      ? "Short video (Reels and optional Page video)"
                       : "Generate the short on the home page first"
                   }
                   onClick={() => {
@@ -2181,10 +2200,13 @@ export default function SchedulePage() {
                 postYt &&
                 youtubeConfigured === false && (
                   <p className="text-xs text-amber-800">
-                    Connect YouTube (see home &quot;Publish now…&quot; flow) and add{" "}
-                    <code className="rounded bg-amber-100/80 px-1">
-                      GOOGLE_YOUTUBE_REFRESH_TOKEN
-                    </code>{" "}
+                    Connect YouTube in{" "}
+                    <a
+                      href="/settings"
+                      className="font-semibold underline"
+                    >
+                      Settings
+                    </a>{" "}
                     to enable this destination.
                   </p>
                 )}

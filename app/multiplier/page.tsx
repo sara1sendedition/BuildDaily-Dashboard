@@ -33,6 +33,7 @@ import {
 import { ShortEditPanel } from "@/app/components/ShortEditPanel";
 import { X_THREADS_OUTPUT_ENABLED } from "@/lib/studio-output-flags";
 import { DriveInboxPanel } from "@/app/components/DriveInboxPanel";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import { peekStitchedFiles, clearStitchedFile } from "@/lib/stitch-handoff";
 import {
   readStitchEnqueuedCreatedAt,
@@ -251,20 +252,19 @@ export default function Home() {
 
         if (data.clientSkipsShort) {
           setVideoToShortWarning(
-            "NEXT_PUBLIC_SKIP_VIDEO_TO_SHORT is set, so this app will not call the Short backend—the original upload is used for the Short step. Carousel and image post are unchanged."
+            "Short video processing is skipped here — the original upload is used instead. Carousel and image post are unchanged."
           );
           return;
         }
         if (data.integrationEnabled === false) {
           setVideoToShortWarning(
-            "Video to Short integration is turned off (VIDEO_TO_SHORT_INTEGRATION). The queue will use your original file for the Short step instead of the external backend."
+            "Short video processing is turned off. The queue will use your original file for the Short step."
           );
           return;
         }
         if (data.backendReachable === false) {
-          const where = data.apiBase?.trim() || "the configured URL";
           setVideoToShortWarning(
-            `The Video to Short backend does not appear to be running (could not reach ${where}). Start it (e.g. FastAPI / uvicorn) or set VIDEO_TO_SHORT_API_URL in .env.local. Carousel and image post still work.`
+            "The Short video service isn't running. Carousel and image post still work."
           );
           return;
         }
@@ -992,8 +992,9 @@ export default function Home() {
       )}
 
       {mobileClient ? (
+        <DismissableHint id="multiplier-phone-tip" className="mb-6">
         <p
-          className={`mb-6 rounded-lg border px-3 py-2 text-sm leading-relaxed ${
+          className={`rounded-lg border px-3 py-2 text-sm leading-relaxed ${
             loading || queueHasActiveWork
               ? "border-violet-200 bg-violet-50 text-violet-950"
               : "border-stone-200 bg-stone-50 text-stone-600"
@@ -1015,6 +1016,7 @@ export default function Home() {
             </>
           )}
         </p>
+        </DismissableHint>
       ) : null}
 
       {inFlightShortJob && (
@@ -1060,7 +1062,7 @@ export default function Home() {
           className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-relaxed text-amber-950"
           role="status"
         >
-          <span className="font-semibold">Video to Short: </span>
+          <span className="font-semibold">Short video: </span>
           {videoToShortWarning}
         </p>
       )}
@@ -1134,7 +1136,7 @@ export default function Home() {
                   }
                   className="h-4 w-4 rounded border-stone-300 text-palette-moss focus:ring-palette-teal"
                 />
-                <span>Reel (Video to Short)</span>
+                <span>Reel</span>
               </label>
             </div>
           </details>
@@ -1376,11 +1378,6 @@ export default function Home() {
               <p className="text-base font-medium text-stone-800">
                 {activeQueueItem?.progress ?? "Creating your posts"}
               </p>
-              <p className="mt-2 max-w-md text-sm text-stone-600">
-                {activeQueueItem?.progress
-                  ? "Video to Short, carousel, and image post run in parallel when enabled — this line updates as each step advances."
-                  : "Starting pipeline…"}
-              </p>
               {studioOutputs.reelShort ||
               studioOutputs.carousel ||
               studioOutputs.imagePost ||
@@ -1454,7 +1451,7 @@ export default function Home() {
                 Nothing generated yet
               </p>
               <p className="mt-2 max-w-sm text-sm text-stone-600">
-                Upload a video to generate your high-converting content
+                Upload a video to get started.
               </p>
             </div>
           ) : (
@@ -1644,7 +1641,7 @@ export default function Home() {
                       >
                         {reRenderLoading
                           ? "Updating…"
-                          : "Bake color into slide PNGs (ZIP)"}
+                          : "Apply color to slides"}
                       </button>
                     </CollapsibleSection>
                     {hasProcessed ? (
@@ -1652,10 +1649,6 @@ export default function Home() {
                         title="Post caption"
                         defaultOpen={false}
                       >
-                        <p className="text-left text-[11px] leading-snug text-stone-500">
-                          AI draft for Instagram/Facebook (Know / Like / Trust).
-                          Edit before publishing.
-                        </p>
                         <label
                           htmlFor={carouselSocialCaptionFieldId}
                           className="sr-only"
@@ -1699,10 +1692,6 @@ export default function Home() {
                         <h2 className="text-lg font-medium text-stone-900">
                           Short (reel)
                         </h2>
-                        <p className="mt-1 max-w-xl text-sm text-stone-600">
-                          Video to Short export (captions, hook, etc.). Carousel and
-                          image post use your original upload without these overlays.
-                        </p>
                       </div>
                       <button
                         type="button"
@@ -1795,19 +1784,20 @@ export default function Home() {
                         </span>
                       </summary>
                       <div className="border-t border-stone-200/60 px-4 pb-4 pt-2">
+                        <DismissableHint id="multiplier-editorial-intro">
                         <p className="text-xs leading-snug text-stone-600">
-                          From your Video to Short run: how the reel was trimmed on
-                          the original timeline, and why.
+                          How the reel was trimmed, and why.
                         </p>
+                        </DismissableHint>
                         {showShortEditorialReport ? (
                           <>
                         {shortEditorialSkip ? (
                           <p className="mt-3 text-sm leading-relaxed text-amber-950">
                             {shortEditorialSkip === "no_openai_api_key"
-                              ? "Smart editorial was skipped — OPENAI_API_KEY is not set on the Short backend. Add it in Coolify (or your host) and restart the service."
+                              ? "Smart cuts are off for this run."
                               : shortEditorialSkip === "llm_error"
-                                ? "Smart editorial was skipped — the editorial LLM call failed (check Short backend logs for the exact error)."
-                                : `Smart editorial was skipped — ${shortEditorialSkip}`}
+                                ? "Smart cuts could not run for this video."
+                                : "Smart cuts are off for this run."}
                           </p>
                         ) : shortEditorialSummary ? (
                           <div className="mt-3 rounded-lg border border-stone-200/80 bg-white/80 px-3 py-2.5">
@@ -1863,25 +1853,8 @@ export default function Home() {
                           </>
                         ) : (
                         <p className="mt-3 text-sm leading-relaxed text-stone-700">
-                          This app did not receive an editorial write-up for this job
-                          (no{" "}
-                          <code className="rounded bg-stone-100 px-1 text-xs">
-                            editorial_summary
-                          </code>
-                          ,{" "}
-                          <code className="rounded bg-stone-100 px-1 text-xs">
-                            editorial_cuts
-                          </code>
-                          , or{" "}
-                          <code className="rounded bg-stone-100 px-1 text-xs">
-                            editorial_skip
-                          </code>{" "}
-                          on the Short job status, including inside{" "}
-                          <code className="rounded bg-stone-100 px-1 text-xs">
-                            meta
-                          </code>
-                          ). Your reel can still include trims and reframes; those
-                          details live on the Video to Short service.
+                          The cut list isn’t available for this run. Your reel can
+                          still include trims.
                         </p>
                         )}
                       </div>
@@ -1994,16 +1967,14 @@ export default function Home() {
             </h2>
             {metaConfigured === false && (
               <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                Add{" "}
-                <code className="rounded bg-amber-100/80 px-1 text-xs">
-                  META_PAGE_ACCESS_TOKEN
-                </code>{" "}
-                and{" "}
-                <code className="rounded bg-amber-100/80 px-1 text-xs">
-                  META_PAGE_ID
-                </code>{" "}
-                to <code className="text-xs">.env.local</code>, then restart the
-                dev server.
+                Connect Instagram or Facebook in{" "}
+                <Link
+                  href="/settings"
+                  className="font-semibold underline"
+                >
+                  Settings
+                </Link>
+                , then try again.
               </p>
             )}
             {metaConfigured === null && scheduleOpen && (
@@ -2036,16 +2007,6 @@ export default function Home() {
                 )}
               </div>
             )}
-            <p className="mt-2 text-sm leading-relaxed text-stone-600">
-              <strong className="font-medium text-stone-800">Carousel</strong>{" "}
-              sends ZIP slide previews (4:5 to Instagram when available).
-              <strong className="font-medium text-stone-800"> Photo</strong> is
-              the single 4:5 still from Image post.
-              <strong className="font-medium text-stone-800"> Short</strong>{" "}
-              uploads your Video to Short MP4 to Instagram, Facebook Page, and
-              your YouTube channel (when connected). Still images use JPEG on
-              the wire for Meta.
-            </p>
             <div className="mt-4">
               <p className="text-sm font-medium text-stone-800">Post type</p>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -2085,7 +2046,7 @@ export default function Home() {
                   disabled={!shortOutputFile}
                   title={
                     shortOutputFile
-                      ? "Video to Short reel"
+                      ? "Short video"
                       : "Generate the short on the Short tab first"
                   }
                   onClick={() => {
@@ -2160,7 +2121,7 @@ export default function Home() {
               postToYouTube &&
               youtubeConfigured === false && (
                 <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-950">
-                  Connect YouTube: open{" "}
+                  Connect YouTube:{" "}
                   <a
                     href={clientApiPath("/api/youtube/auth")}
                     target="_blank"
@@ -2169,22 +2130,15 @@ export default function Home() {
                   >
                     Sign in with Google
                   </a>
-                  , then add{" "}
-                  <code className="rounded bg-amber-100/80 px-1">
-                    GOOGLE_YOUTUBE_REFRESH_TOKEN
-                  </code>{" "}
-                  from the callback page to{" "}
-                  <code className="text-xs">.env.local</code> and restart the dev
-                  server.
+                  .
                 </p>
               )}
             {metaPublishKind === "carousel" &&
               postToInstagram &&
               instagramSlides.length === 0 && (
                 <p className="mt-2 text-sm text-red-700">
-                  No 4:5 carousel files in the ZIP — re-generate or use Edit
-                  carousel so exports include{" "}
-                  <code className="text-xs">instagram_4x5</code> slides.
+                  No 4:5 carousel slides yet — regenerate or edit the carousel
+                  first.
                 </p>
               )}
             <label className="mt-4 block text-sm font-medium text-stone-800">
@@ -2196,11 +2150,12 @@ export default function Home() {
                 className="mt-1.5 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal"
               />
             </label>
-            <p className="mt-1 text-xs text-stone-500">
-              Leave empty to publish as soon as each platform accepts the
-              request. Meta and YouTube enforce their own scheduling windows
-              (e.g. not in the past; YouTube often needs ~15+ minutes ahead).
-            </p>
+            <DismissableHint id="multiplier-schedule-windows" className="mt-1">
+              <p className="text-xs text-stone-500">
+                Leave empty to post now. YouTube often needs about 15 minutes of
+                lead time.
+              </p>
+            </DismissableHint>
             {publishFeedback && (
               <p
                 className={`mt-3 rounded-lg border px-3 py-2 text-sm ${

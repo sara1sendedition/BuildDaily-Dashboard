@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import { FrameColorAdjustSliders } from "@/app/components/FrameColorAdjustSliders";
 import { useCarouselWorkspace } from "@/context/carousel-workspace-context";
 import {
@@ -181,10 +182,12 @@ export function ImagePostStudioPanel() {
         <p className="mt-2 text-sm leading-relaxed text-stone-700">
           {imagePost.altText}
         </p>
+        <DismissableHint id="image-post-studio-alt-paste">
         <p className="mt-2 text-xs text-stone-500">
           Paste into the post&apos;s Accessibility → Alt text field when you
           publish.
         </p>
+        </DismissableHint>
       </CollapsibleSection>
 
       <div className="flex justify-center">
@@ -267,12 +270,11 @@ export function ImagePostStudioPanel() {
           onClick={() => void applyImagePostFrameColor()}
           className="mt-4 w-full rounded-xl border border-palette-teal bg-palette-pale/25 py-2.5 text-sm font-semibold text-stone-800 transition hover:bg-palette-pale/45 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {imagePostBusy ? "Updating…" : "Bake color into PNG (FFmpeg)"}
+          {imagePostBusy ? "Updating…" : "Apply color to image"}
         </button>
         <p className="mt-2 text-center text-[11px] leading-snug text-stone-500">
-          Sliders update the preview above immediately. Use the button when you
-          want the exported / downloaded image to match (re-draws the frame
-          under your hook and subline).
+          Sliders update the preview. Use the button when you want the downloaded
+          image to match.
         </p>
       </CollapsibleSection>
 
@@ -296,10 +298,6 @@ export function ImagePostStudioPanel() {
             >
               Edit text
             </h2>
-            <p className="mt-1 text-sm text-stone-600">
-              Change the hook and subline on the image and the caption. Updating
-              the image reuses your video at the same frame time.
-            </p>
             <p className="mt-2 rounded-lg bg-stone-50 px-3 py-2 text-xs leading-relaxed text-stone-600">
               Changing <strong className="font-medium text-stone-800">only</strong>{" "}
               the caption updates the caption card below the preview, not the

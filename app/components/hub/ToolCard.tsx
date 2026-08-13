@@ -17,7 +17,6 @@ export function ToolCard({
   title,
   subtitle,
   statLine,
-  nudge,
   href,
   cta,
   external,
@@ -33,15 +32,11 @@ export function ToolCard({
     <>
       <h3 className="font-semibold text-stone-900">{title}</h3>
       <p className="mt-1 text-sm text-stone-600 flex-1">{subtitle}</p>
-      <p
-        className={`mt-3 text-sm tabular-nums ${
-          statLine && !statLine.startsWith("—")
-            ? "font-semibold text-[var(--bd-green-800)]"
-            : "text-stone-500"
-        }`}
-      >
-        {statLine || nudge}
-      </p>
+      {statLine && !statLine.startsWith("—") ? (
+        <p className="mt-3 text-sm font-semibold tabular-nums text-[var(--bd-green-800)]">
+          {statLine}
+        </p>
+      ) : null}
       {muted ? (
         <span className="mt-4 text-sm font-medium text-stone-400">{cta}</span>
       ) : (

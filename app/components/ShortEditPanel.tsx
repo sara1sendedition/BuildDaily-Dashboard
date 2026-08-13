@@ -137,9 +137,6 @@ export function ShortEditPanel({
               placeholder="Guide smart editorial cuts (what to trim or keep)…"
               className="w-full resize-y rounded-md border border-stone-200 px-2 py-1.5 text-sm text-stone-900 placeholder:text-stone-400 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
             />
-            <p className="mt-1 text-[11px] text-stone-500">
-              Saved in this browser for the next upload too.
-            </p>
           </label>
         </fieldset>
 
@@ -147,10 +144,10 @@ export function ShortEditPanel({
           <legend className="text-xs font-semibold uppercase tracking-wide text-stone-600">
             Pipeline
           </legend>
-          <p className="text-[11px] leading-snug text-stone-500">
+            <p className="text-[11px] leading-snug text-stone-500">
             {pipeline.devMode
-              ? "Dev mode is on — fast audio cleanup for quicker iteration. Turn it off under Advanced pipeline for production DeepFilter."
-              : "Production pipeline — DeepFilter and your saved audio choice apply on re-process and your next upload."}
+              ? "Faster preview audio. Turn this off under Advanced for cleaner audio on the next run."
+              : "Cleaner audio and your saved audio choice apply on re-process and your next upload."}
           </p>
           <label className="flex cursor-pointer items-start gap-2 text-sm text-stone-800">
             <input
@@ -221,8 +218,8 @@ export function ShortEditPanel({
                 <span>
                   <span className="font-medium">Dev mode</span>
                   <span className="mt-0.5 block text-xs text-stone-500">
-                    Fast audio cleanup while you iterate. Uncheck for production
-                    DeepFilter on the next run.
+                    Faster preview audio while you iterate. Uncheck for cleaner
+                    audio on the next run.
                   </span>
                 </span>
               </label>
@@ -240,7 +237,7 @@ export function ShortEditPanel({
                     }}
                     className="w-full rounded-md border border-stone-200 bg-white px-2 py-1.5 text-sm text-stone-900 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
                   >
-                    <option value="deepfilter">DeepFilter (recommended)</option>
+                    <option value="deepfilter">Cleaner (recommended)</option>
                     <option value="fast">Fast (light cleanup)</option>
                     <option value="original">Original (no enhancement)</option>
                   </select>

@@ -18,6 +18,7 @@ import {
   getStoredVisualReference,
   setStoredVisualReference,
 } from "@/lib/visual-reference-storage";
+import { DismissableHint } from "@/app/components/DismissableHint";
 
 const KINDS: {
   id: VisualReferenceKind;
@@ -33,7 +34,7 @@ const KINDS: {
     id: "photo",
     title: "Photo reference",
     blurb:
-      "Single-frame social look for AI copy and colors. Carousel slide photos still come from your video frames (or optional background upload), not this file—this reference does not replace them pixel-for-pixel.",
+      "This sets colors and copy tone. Slide photos still come from your video, not this file.",
   },
   {
     id: "image",
@@ -186,37 +187,10 @@ function ProfileDetails({ p }: { p: VisualReferenceProfile }) {
         </div>
       </details>
 
-      <details className="rounded-xl border border-stone-200 bg-amber-50/40 p-4">
-        <summary className="cursor-pointer font-semibold text-stone-900">
-          Typography, copy deck, branding, overlays…
-        </summary>
-        <p className="mt-2 text-sm text-stone-600">
-          {p.referenceOcr ? (
-            <>
-              OCR below captures visible text, line-length stats, CTA keywords, and
-              Tesseract font hints when the engine exposes them. True font-family ID,
-              grids, glow, and logo placement still belong in your extended markdown.
-            </>
-          ) : (
-            <>
-              <strong className="font-medium text-stone-800">Upload &amp; analyze</strong>{" "}
-              only measures color, palette, and composition. Text and layout hints are{" "}
-              <em>not</em> filled until you click the{" "}
-              <strong className="font-medium text-stone-800">OCR &amp; layout</strong> button
-              in the button row <em>above</em> this panel (next to Re-run analysis), then{" "}
-              <strong className="font-medium text-stone-800">Save to browser</strong> if you
-              want it sent with requests. Alternatively, document fonts, line length, hook
-              format, CTA, margins, logo placement, stroke/shadow, and grid in the extended
-              markdown field below.
-            </>
-          )}
-        </p>
-      </details>
-
       {p.referenceOcr ? (
         <details open className="rounded-xl border border-stone-200 bg-white p-4">
           <summary className="cursor-pointer font-semibold text-stone-900">
-            OCR &amp; layout (Tesseract, browser)
+            OCR &amp; layout
           </summary>
           <OcrDetails o={p.referenceOcr} />
         </details>
@@ -568,7 +542,13 @@ function KindPanel({
   return (
     <section className="rounded-2xl border border-stone-200/80 bg-white/90 p-6 shadow-sm">
       <h2 className="text-lg font-semibold text-stone-900">{spec.title}</h2>
-      <p className="mt-1 text-sm text-stone-600">{spec.blurb}</p>
+      {spec.id === "photo" ? (
+        <DismissableHint id="visual-ref-photo-blurb">
+          <p className="mt-1 text-sm text-stone-600">{spec.blurb}</p>
+        </DismissableHint>
+      ) : (
+        <p className="mt-1 text-sm text-stone-600">{spec.blurb}</p>
+      )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <input
@@ -797,16 +777,7 @@ export default function VisualReferencesSettingsPage() {
         <div>
           <h1 className="text-2xl font-bold text-stone-900">Visual references</h1>
           <p className="mt-1 text-sm text-stone-600">
-            Upload one reference per workflow. We extract measurable color, tone,
-            palette, and layout heuristics in the browser. After you{" "}
-            <strong className="font-medium text-stone-800">Save to browser</strong>
-            , the profile is sent with{" "}
-            <strong className="font-medium text-stone-800">
-              carousel / image-post / re-render
-            </strong>{" "}
-            requests: carousel + photo refs steer slide and caption AI; image ref
-            steers hook/caption AI and on-image text colors; carousel ref also sets
-            slide text and frame accent colors when present.
+            Upload a look you like, then save.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

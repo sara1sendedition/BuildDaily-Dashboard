@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DriveClipPickerModal } from "@/app/components/DriveClipPickerModal";
+import { DismissableHint } from "@/app/components/DismissableHint";
 import type { DriveInboxFile } from "@/app/components/DriveInboxPanel";
 import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
 import { fetchDriveInboxConfigured } from "@/lib/drive-inbox-available";
@@ -607,14 +608,14 @@ export default function StitchPage() {
         <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
           Stitch
         </h1>
-        <p className="mt-2 text-sm text-stone-600">
-          Combine clips into one video, then send it to Multiplier (all formats) or
-          Video Editor (short only).
-        </p>
+        <DismissableHint id="stitch-subtitle">
+          <p className="mt-2 text-sm text-stone-600">
+            Combine clips into one video, then send it to Multiplier or Video Editor.
+          </p>
+        </DismissableHint>
         {driveInboxConfigured === false ? (
           <p className="mt-1 text-xs text-amber-800">
-            Google Drive inbox is not configured on the Video to Short backend
-            yet — the Drive button will explain what to set in Coolify.
+            Drive is not connected yet.
           </p>
         ) : null}
       </section>

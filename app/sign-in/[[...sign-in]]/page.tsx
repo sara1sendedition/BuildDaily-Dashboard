@@ -1,4 +1,6 @@
 import { SignIn } from "@clerk/nextjs";
+import { BuildDailyAuthBrand } from "@/app/components/BuildDailyAuthBrand";
+import { buildDailyClerkAppearance } from "@/lib/clerk-appearance";
 
 export const metadata = {
   title: "Sign in",
@@ -6,8 +8,9 @@ export const metadata = {
 
 export default function SignInPage() {
   return (
-    <main className="flex min-h-[80vh] items-center justify-center px-4 py-12">
-      <SignIn />
+    <main className="flex min-h-[80vh] flex-col items-center justify-center gap-8 bg-[var(--bd-paper)] px-4 py-12">
+      <BuildDailyAuthBrand />
+      <SignIn appearance={buildDailyClerkAppearance} />
     </main>
   );
 }

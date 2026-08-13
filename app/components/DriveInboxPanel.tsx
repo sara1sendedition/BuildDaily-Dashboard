@@ -268,38 +268,19 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
         ) : null}
       </div>
 
-      {collapsed ? (
-        <p className="mt-2 text-xs text-stone-500">
-          Collapsed — click to browse Drive clips.
-        </p>
-      ) : null}
-
       {!collapsed && mode === "loading" ? (
         <p className="mt-2 text-xs text-stone-500">Checking Drive inbox…</p>
       ) : null}
 
       {!collapsed && mode === "missing-api" ? (
         <p className="mt-2 text-xs text-amber-800">
-          Drive import is not deployed on this app yet. Redeploy{" "}
-          <strong>ContentMultiplier</strong> from GitHub (commit{" "}
-          <code className="rounded bg-amber-100 px-1">219df7a</code> or later), not
-          BuildDaily-Dashboard.
+          Drive import isn’t available yet.
         </p>
       ) : null}
 
       {!collapsed && mode === "not-configured" ? (
         <p className="mt-2 text-xs text-stone-600">
-          Drive inbox is not configured on the <strong>Video to Short</strong>{" "}
-          backend. In Coolify, set{" "}
-          <code className="rounded bg-stone-200 px-1">
-            GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON
-          </code>{" "}
-          and{" "}
-          <code className="rounded bg-stone-200 px-1">
-            GOOGLE_DRIVE_INBOX_FOLDER_ID
-          </code>
-          , share the folder with the service account email, then redeploy
-          video-to-short.
+          Drive is not connected yet.
         </p>
       ) : null}
 

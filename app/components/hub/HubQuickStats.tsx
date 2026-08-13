@@ -38,7 +38,7 @@ export function HubQuickStats({
       label: "Published",
       value: postsPublished,
       href: "/schedule",
-      nudge: "Via calendar daemon",
+      nudge: "",
     },
   ];
 
@@ -54,9 +54,11 @@ export function HubQuickStats({
           <p className="mt-1 text-2xl font-bold tabular-nums text-[var(--bd-ink)]">
             {item.value}
           </p>
-          <p className="mt-1 text-xs text-stone-500">
-            {item.value > 0 ? "View →" : item.nudge}
-          </p>
+          {item.value > 0 || item.nudge ? (
+            <p className="mt-1 text-xs text-stone-500">
+              {item.value > 0 ? "View →" : item.nudge}
+            </p>
+          ) : null}
         </Link>
       ))}
     </div>
