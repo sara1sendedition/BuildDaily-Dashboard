@@ -1,5 +1,4 @@
-# Coolify / Nixpacks. Hub carousel + image-post spawn ffprobe/ffmpeg
-# in this Node process (Video to Short's image already has FFmpeg).
+# Coolify / Nixpacks. `"..."` keeps Node (and other auto-detected packages);
+# without it this phase replaces them and the Next.js build fails.
 [phases.setup]
-aptPkgs = ["ffmpeg"]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ["...", "ffmpeg"]
