@@ -175,6 +175,9 @@ export function localQueueStatusFromHub(opts: {
   }
   if (agg === "failed" || opts.hubStatus === "failed") return "error";
   if (opts.hubStatus === "processing") return "processing";
+  if (opts.hubStatus === "pending" || opts.hubStatus === "queued") {
+    return "pending";
+  }
   return "done";
 }
 

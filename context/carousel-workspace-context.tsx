@@ -1768,11 +1768,16 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           payload.bunnyUrls.sourceVideoUrl.trim()
             ? payload.bunnyUrls.sourceVideoUrl.trim()
             : undefined;
+        const payloadDriveFileId =
+          typeof payload.driveFileId === "string" && payload.driveFileId.trim()
+            ? payload.driveFileId.trim()
+            : undefined;
         const interruptedProcessing =
           item.status === "processing" &&
           stubFile.size === 0 &&
           !payloadProcessingJobId &&
-          !payloadSourceVideoUrl;
+          !payloadSourceVideoUrl &&
+          !payloadDriveFileId;
         const payloadShortJobId =
           typeof payload.shortJobId === "string" && payload.shortJobId.trim()
             ? payload.shortJobId.trim()

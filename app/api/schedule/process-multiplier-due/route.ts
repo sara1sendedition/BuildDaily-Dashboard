@@ -10,6 +10,23 @@ import { claimMultiplierProcessingJobs } from "@/lib/multiplier/claim-processing
 export const runtime = "nodejs";
 export const maxDuration = 1800;
 
+/**
+ * Browsers GET this cron URL and used to see HTTP 405. HTML navigations go
+ * to the queue; probes/health checks get JSON so Coolify does not treat
+ * the worker path as down.
+ */
+export function GET(request: Request) {
+  const accept = request.headers.get("accept") ?? "";
+  if (accept.includes("text/html")) {
+    return NextResponse.redirect(new URL("/multiplier", request.url), 303);
+  }
+  return NextResponse.json({
+    ok: true,
+    message:
+      "This worker only runs on POST. Open /multiplier to see the queue.",
+  });
+}
+
 function concurrency(): number {
   const raw = Number(
     process.env.MULTIPLIER_PROCESS_CONCURRENCY?.trim() || "3",
