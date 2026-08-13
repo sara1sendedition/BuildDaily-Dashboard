@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { isMobileClient } from "@/lib/mobile-client";
 
 type Props = {
   url: string;
@@ -14,7 +15,6 @@ type Props = {
 function looksLikeMp4(buf: ArrayBuffer): boolean {
   if (buf.byteLength < 12) return false;
   const bytes = new Uint8Array(buf, 0, Math.min(64, buf.byteLength));
-  // ISO BMFF: size(4) + 'ftyp' at offset 4
   const tag = String.fromCharCode(bytes[4]!, bytes[5]!, bytes[6]!, bytes[7]!);
   return tag === "ftyp";
 }
@@ -22,9 +22,8 @@ function looksLikeMp4(buf: ArrayBuffer): boolean {
 /**
  * Vertical Short/Reel preview (9:16).
  *
- * Warm remux with `prepare=1`, download the signed MP4 into a blob, then play
- * locally. iPhone Safari is unreliable with Range-streamed API `<video src>`
- * even when the bytes are fine — blobs avoid that class of failure.
+ * Desktop: play the URL directly (CDN or blob) — no re-encode.
+ * Phone + faststart proxy: prepare → signed download → blob (iOS-safe).
  */
 export function ShortPreviewPlayer({
   url,
@@ -35,7 +34,7 @@ export function ShortPreviewPlayer({
 }: Props) {
   const [src, setSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("Preparing vertical preview…");
+  const [status, setStatus] = useState("Loading preview…");
   const [error, setError] = useState<string | null>(null);
   const ownedBlobRef = useRef<string | null>(null);
 
@@ -82,7 +81,7 @@ export function ShortPreviewPlayer({
       setLoading(true);
       setError(null);
       setSrc(null);
-      setStatus("Preparing vertical preview…");
+      setStatus("Loading preview…");
       revokeOwned();
 
       const raw = url.trim();
@@ -102,58 +101,51 @@ export function ShortPreviewPlayer({
       }
 
       const isFaststartProxy = raw.includes("/api/media/mp4-faststart");
+      const needsPhonePath = isFaststartProxy && isMobileClient();
 
       try {
-        let playUrl = raw;
-
-        if (isFaststartProxy) {
-          setStatus("Encoding a phone-friendly preview…");
-          const prepareUrl = raw.includes("prepare=1")
-            ? raw
-            : `${raw}${raw.includes("?") ? "&" : "?"}prepare=1`;
-          const prep = await fetch(prepareUrl, {
-            credentials: "same-origin",
-            cache: "no-store",
-          });
-          if (!prep.ok) {
-            let detail = `Preview failed (${prep.status}).`;
-            try {
-              const j = (await prep.json()) as { error?: string };
-              if (j?.error) detail = j.error;
-            } catch {
-              /* ignore */
-            }
-            throw new Error(detail);
+        // Desktop (or any non-proxy URL): stream directly — no server encode.
+        if (!needsPhonePath) {
+          if (!cancelled) {
+            setSrc(raw);
+            setLoading(false);
           }
-          const body = (await prep.json()) as { playUrl?: string };
-          const signed = body.playUrl?.trim();
-          if (!signed) {
-            throw new Error("Preview prepare did not return a play URL.");
-          }
-          playUrl = signed;
-        }
-
-        if (
-          playUrl.startsWith("/") ||
-          playUrl.includes("/api/") ||
-          isFaststartProxy
-        ) {
-          setStatus("Downloading preview…");
-          const objectUrl = await loadAsBlob(playUrl);
-          if (cancelled) {
-            URL.revokeObjectURL(objectUrl);
-            return;
-          }
-          ownedBlobRef.current = objectUrl;
-          setSrc(objectUrl);
-          setLoading(false);
           return;
         }
 
-        if (!cancelled) {
-          setSrc(playUrl);
-          setLoading(false);
+        setStatus("Encoding a phone-friendly preview…");
+        const prepareUrl = raw.includes("prepare=1")
+          ? raw
+          : `${raw}${raw.includes("?") ? "&" : "?"}prepare=1`;
+        const prep = await fetch(prepareUrl, {
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (!prep.ok) {
+          let detail = `Preview failed (${prep.status}).`;
+          try {
+            const j = (await prep.json()) as { error?: string };
+            if (j?.error) detail = j.error;
+          } catch {
+            /* ignore */
+          }
+          throw new Error(detail);
         }
+        const body = (await prep.json()) as { playUrl?: string };
+        const signed = body.playUrl?.trim();
+        if (!signed) {
+          throw new Error("Preview prepare did not return a play URL.");
+        }
+
+        setStatus("Downloading preview…");
+        const objectUrl = await loadAsBlob(signed);
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        ownedBlobRef.current = objectUrl;
+        setSrc(objectUrl);
+        setLoading(false);
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : "Could not load preview.");
@@ -213,7 +205,7 @@ export function ShortPreviewPlayer({
             src={src}
             controls
             playsInline
-            preload="auto"
+            preload="metadata"
             className="absolute inset-0 h-full w-full object-contain"
             onLoadedData={() => setLoading(false)}
             onLoadedMetadata={(e) => {
@@ -223,7 +215,7 @@ export function ShortPreviewPlayer({
             }}
             onError={() => {
               setError(
-                "Phone still rejected the preview file after re-encode. Use Download MP4 for now.",
+                "Could not play this preview. Try Download MP4, or re-open after a refresh.",
               );
               onMediaError?.();
             }}

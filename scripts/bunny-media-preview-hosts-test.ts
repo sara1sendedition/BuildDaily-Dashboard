@@ -50,10 +50,18 @@ expect(
   "require https",
 );
 
-const proxied = mobileFriendlyMp4PreviewUrl(
-  "https://cdn.builddaily.app/reels/a.mp4",
+expect(
+  mobileFriendlyMp4PreviewUrl(
+    "https://cdn.builddaily.app/reels/a.mp4",
+    { forceProxy: true },
+  )?.includes("/api/media/mp4-faststart?url="),
+  "proxy wrap CDN when forced",
 );
-expect(proxied?.includes("/api/media/mp4-faststart?url="), "proxy wrap CDN");
+expect(
+  mobileFriendlyMp4PreviewUrl("https://cdn.builddaily.app/reels/a.mp4") ===
+    "https://cdn.builddaily.app/reels/a.mp4",
+  "desktop returns CDN as-is (no phone remux)",
+);
 expect(
   mobileFriendlyMp4PreviewUrl("blob:https://app/1") === "blob:https://app/1",
   "passthrough blob",

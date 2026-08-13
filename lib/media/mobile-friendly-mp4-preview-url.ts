@@ -1,4 +1,5 @@
 import { clientApiPath } from "@/lib/client-api-path";
+import { isMobileClient } from "@/lib/mobile-client";
 
 function hostMatchesDomain(hostname: string, domain: string): boolean {
   const h = hostname.toLowerCase();
@@ -25,11 +26,19 @@ export function isBunnyMediaPreviewHost(hostname: string): boolean {
 }
 
 /**
- * Same-origin preview URL that remuxes Bunny MP4s with faststart for iOS Safari.
- * Blob / same-origin / already-proxied URLs are returned unchanged.
+ * Preview URL for Shorts.
+ *
+ * Desktop: return the Bunny CDN URL as-is (Chrome/Firefox/Safari desktop handle
+ * moov-at-end fine — no need for the slow baseline re-encode).
+ *
+ * Phone: same-origin `/api/media/mp4-faststart` remux/transcode for iOS Safari.
+ *
+ * Pass `{ forceProxy: true }` only when you intentionally need the phone path
+ * (tests, etc.).
  */
 export function mobileFriendlyMp4PreviewUrl(
   url: string | null | undefined,
+  opts?: { forceProxy?: boolean },
 ): string | null {
   const raw = url?.trim() ?? "";
   if (!raw) return null;
@@ -42,6 +51,12 @@ export function mobileFriendlyMp4PreviewUrl(
   } catch {
     return raw;
   }
+
+  // Desktop browsers play CDN MP4s without the phone remux/transcode path.
+  if (!opts?.forceProxy && !isMobileClient()) {
+    return raw;
+  }
+
   return clientApiPath(
     `/api/media/mp4-faststart?url=${encodeURIComponent(raw)}`,
   );
