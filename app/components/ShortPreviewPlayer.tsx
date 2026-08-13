@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { isMobileClient } from "@/lib/mobile-client";
 
 type Props = {
@@ -12,18 +12,24 @@ type Props = {
   onMediaError?: () => void;
 };
 
-function looksLikeMp4(buf: ArrayBuffer): boolean {
-  if (buf.byteLength < 12) return false;
-  const bytes = new Uint8Array(buf, 0, Math.min(64, buf.byteLength));
-  const tag = String.fromCharCode(bytes[4]!, bytes[5]!, bytes[6]!, bytes[7]!);
-  return tag === "ftyp";
+/** If this is our remux proxy, return the original Bunny CDN URL from `?url=`. */
+function unwrapFaststartSourceUrl(raw: string): string | null {
+  if (!raw.includes("/api/media/mp4-faststart")) return null;
+  try {
+    const u = new URL(raw, typeof window !== "undefined" ? window.location.href : "https://local");
+    const source = u.searchParams.get("url")?.trim() ?? "";
+    return source || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Vertical Short/Reel preview (9:16).
  *
- * Desktop: play the URL directly (CDN or blob) — no re-encode.
- * Phone + faststart proxy: prepare → signed download → blob (iOS-safe).
+ * Desktop: play Bunny CDN (or unwrap a leftover proxy URL) — no encode/download.
+ * Phone: warm encode via prepare=1, then stream the signed URL (no full-file
+ * blob download — that was hanging for minutes on large reels).
  */
 export function ShortPreviewPlayer({
   url,
@@ -36,53 +42,15 @@ export function ShortPreviewPlayer({
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("Loading preview…");
   const [error, setError] = useState<string | null>(null);
-  const ownedBlobRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-
-    function revokeOwned() {
-      if (ownedBlobRef.current) {
-        URL.revokeObjectURL(ownedBlobRef.current);
-        ownedBlobRef.current = null;
-      }
-    }
-
-    async function loadAsBlob(playUrl: string): Promise<string> {
-      const res = await fetch(playUrl, {
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      if (!res.ok) {
-        let detail = `Preview download failed (${res.status}).`;
-        try {
-          const j = (await res.json()) as { error?: string };
-          if (j?.error) detail = j.error;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(detail);
-      }
-      const type = (res.headers.get("content-type") || "").toLowerCase();
-      if (type.includes("json") || type.includes("text/html")) {
-        throw new Error("Preview endpoint returned a non-video response.");
-      }
-      const buf = await res.arrayBuffer();
-      if (buf.byteLength < 64) throw new Error("Preview file was empty.");
-      if (!looksLikeMp4(buf)) {
-        throw new Error(
-          "Preview bytes were not a valid MP4 (server may have returned an error page).",
-        );
-      }
-      return URL.createObjectURL(new Blob([buf], { type: "video/mp4" }));
-    }
 
     async function prepare() {
       setLoading(true);
       setError(null);
       setSrc(null);
       setStatus("Loading preview…");
-      revokeOwned();
 
       const raw = url.trim();
       if (!raw) {
@@ -101,11 +69,22 @@ export function ShortPreviewPlayer({
       }
 
       const isFaststartProxy = raw.includes("/api/media/mp4-faststart");
-      const needsPhonePath = isFaststartProxy && isMobileClient();
+      const bunnySource = unwrapFaststartSourceUrl(raw);
+      const onPhone = isMobileClient();
+
+      // Desktop (or tablet that isn't phone Safari): never hit the remux/download
+      // path. Unwrap proxy URLs left over from before this split.
+      if (!onPhone) {
+        const direct = bunnySource || raw;
+        if (!cancelled) {
+          setSrc(direct);
+          setLoading(false);
+        }
+        return;
+      }
 
       try {
-        // Desktop (or any non-proxy URL): stream directly — no server encode.
-        if (!needsPhonePath) {
+        if (!isFaststartProxy) {
           if (!cancelled) {
             setSrc(raw);
             setLoading(false);
@@ -136,17 +115,20 @@ export function ShortPreviewPlayer({
         if (!signed) {
           throw new Error("Preview prepare did not return a play URL.");
         }
-
-        setStatus("Downloading preview…");
-        const objectUrl = await loadAsBlob(signed);
-        if (cancelled) {
-          URL.revokeObjectURL(objectUrl);
+        // Stream the warmed file — do not download the entire MP4 into a blob
+        // (that was the multi-minute "Downloading preview…" hang).
+        if (!cancelled) {
+          setSrc(signed);
+          setLoading(false);
+        }
+      } catch (e) {
+        // Last resort on phone: try the original Bunny URL so the user isn't stuck.
+        if (!cancelled && bunnySource) {
+          setError(null);
+          setSrc(bunnySource);
+          setLoading(false);
           return;
         }
-        ownedBlobRef.current = objectUrl;
-        setSrc(objectUrl);
-        setLoading(false);
-      } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : "Could not load preview.");
           onMediaError?.();
@@ -158,7 +140,6 @@ export function ShortPreviewPlayer({
     void prepare();
     return () => {
       cancelled = true;
-      revokeOwned();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
