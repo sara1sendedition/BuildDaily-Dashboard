@@ -14,11 +14,17 @@ export const maxDuration = 1800;
  * Browsers GET this cron URL and used to see HTTP 405. HTML navigations go
  * to the queue; probes/health checks get JSON so Coolify does not treat
  * the worker path as down.
+ *
+ * Use a relative Location. `new URL(..., request.url)` behind Coolify is the
+ * container origin (`localhost:3000`) and would send the browser there.
  */
 export function GET(request: Request) {
   const accept = request.headers.get("accept") ?? "";
   if (accept.includes("text/html")) {
-    return NextResponse.redirect(new URL("/multiplier", request.url), 303);
+    return new NextResponse(null, {
+      status: 303,
+      headers: { Location: "/multiplier" },
+    });
   }
   return NextResponse.json({
     ok: true,
