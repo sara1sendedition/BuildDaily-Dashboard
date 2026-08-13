@@ -138,6 +138,7 @@ function shouldAutoResumeShort(
     return false;
   }
   if (err.includes("download failed")) return true;
+  if (err.includes("no reel mp4")) return true;
   if (hasShortEditorialMetadata(q)) {
     return !isTerminalShortResumeError(q.shortError);
   }
@@ -1670,7 +1671,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   function buildHubPayload(
     snap: QueueCarouselSnapshot | undefined,
-    q?: Pick<VideoQueueItem, "shortJobId" | "studioOutputs">
+    q?: Pick<VideoQueueItem, "shortJobId" | "studioOutputs" | "error">
   ): MultiplierQueuePayload {
     const studioOutputs =
       q?.studioOutputs &&
@@ -1690,6 +1691,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         v: 1,
         ...(q?.shortJobId ? { shortJobId: q.shortJobId } : {}),
         ...(studioOutputs ? { studioOutputs } : {}),
+        ...(q?.error ? { error: q.error } : {}),
       };
     }
     return {
@@ -1697,6 +1699,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       ...(snap.bunnyUrls ? { bunnyUrls: snap.bunnyUrls } : {}),
       ...(q?.shortJobId ? { shortJobId: q.shortJobId } : {}),
       ...(studioOutputs ? { studioOutputs } : {}),
+      ...(q?.error ? { error: q.error } : {}),
       ...(snap.socialCaption ? { socialCaption: snap.socialCaption } : {}),
       ...(() => {
         const copy = imagePostCopyFromSnapshot(snap.imagePost);
@@ -1748,11 +1751,34 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         const stubFile = new File([], item.videoLabel || "video.mp4", {
           type: "video/mp4",
         });
+        const payloadProcessingJobId =
+          typeof payload.processingJobId === "string" &&
+          payload.processingJobId.trim()
+            ? payload.processingJobId.trim()
+            : undefined;
+        const payloadSourceVideoUrl =
+          typeof payload.bunnyUrls?.sourceVideoUrl === "string" &&
+          payload.bunnyUrls.sourceVideoUrl.trim()
+            ? payload.bunnyUrls.sourceVideoUrl.trim()
+            : undefined;
         const interruptedProcessing =
-          item.status === "processing" && stubFile.size === 0;
+          item.status === "processing" &&
+          stubFile.size === 0 &&
+          !payloadProcessingJobId &&
+          !payloadSourceVideoUrl;
         const payloadShortJobId =
           typeof payload.shortJobId === "string" && payload.shortJobId.trim()
             ? payload.shortJobId.trim()
+            : undefined;
+        const payloadOutputs =
+          payload.outputs && typeof payload.outputs === "object"
+            ? payload.outputs
+            : undefined;
+        const payloadShortError =
+          payloadOutputs?.short?.status === "failed" &&
+          typeof payloadOutputs.short.error === "string" &&
+          payloadOutputs.short.error.trim()
+            ? payloadOutputs.short.error.trim()
             : undefined;
         const payloadStudioOutputs =
           payload.studioOutputs &&
@@ -1775,6 +1801,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
               ? "error"
               : item.status,
           ...(payloadShortJobId ? { shortJobId: payloadShortJobId } : {}),
+          ...(payloadShortError ? { shortError: payloadShortError } : {}),
           ...(payloadStudioOutputs
             ? { studioOutputs: payloadStudioOutputs }
             : {}),
@@ -1783,7 +1810,18 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                 error:
                   "Processing was interrupted. Re-upload your video or return from Stitch to continue.",
               }
-            : {}),
+            : item.status === "failed"
+              ? {
+                  error:
+                    (typeof payload.error === "string" && payload.error.trim()
+                      ? payload.error.trim()
+                      : undefined) ||
+                    payloadShortError ||
+                    payloadOutputs?.carousel?.error ||
+                    payloadOutputs?.photo?.error ||
+                    "Processing failed.",
+                }
+              : {}),
         });
         const snap: QueueCarouselSnapshot = {
           recommendation: null,

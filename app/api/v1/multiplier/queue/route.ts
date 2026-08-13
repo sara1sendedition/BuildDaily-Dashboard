@@ -7,6 +7,11 @@ import {
   requiredStr,
   str,
 } from "@/app/api/v1/_lib/responses";
+import {
+  mergeHubQueuePayload,
+  resolveHubQueueStatus,
+  withQueueFailureError,
+} from "@/lib/multiplier-queue/merge-hub-payload";
 
 export const runtime = "nodejs";
 
@@ -58,17 +63,46 @@ export const POST = withUser(async ({ req, user }) => {
     );
   }
 
-  const data = {
-    videoLabel,
-    status: statusRaw,
-    kind: kindRaw ?? null,
-    payload: (body.payload ?? {}) as object,
-  };
+  const existing = await prisma.multiplierQueueItem.findFirst({
+    where: { id, userId: user.id },
+  });
 
-  const row = await prisma.multiplierQueueItem.upsert({
+  if (!existing) {
+    const payload = withQueueFailureError(
+      (body.payload && typeof body.payload === "object"
+        ? (body.payload as Record<string, unknown>)
+        : { v: 1 }) as Record<string, unknown>,
+      statusRaw,
+    );
+    const row = await prisma.multiplierQueueItem.create({
+      data: {
+        id,
+        userId: user.id,
+        videoLabel,
+        status: statusRaw,
+        kind: kindRaw ?? null,
+        payload: payload as object,
+      },
+    });
+    return json({ data: row });
+  }
+
+  const mergedPayload = mergeHubQueuePayload(existing.payload, body.payload);
+  const status = resolveHubQueueStatus({
+    existingStatus: existing.status,
+    incomingStatus: statusRaw,
+    mergedPayload,
+  });
+  const payload = withQueueFailureError(mergedPayload, status);
+
+  const row = await prisma.multiplierQueueItem.update({
     where: { id },
-    update: data,
-    create: { id, userId: user.id, ...data },
+    data: {
+      videoLabel,
+      status,
+      kind: kindRaw ?? existing.kind,
+      payload: payload as object,
+    },
   });
   return json({ data: row });
 });

@@ -34,6 +34,7 @@ export function mergeHubQueuePayload(
     "shortJobId",
     "driveFileId",
     "shortOutputRevision",
+    "error",
   ]);
 
   for (const [k, v] of Object.entries(incoming)) {
@@ -83,6 +84,7 @@ export function mergeHubQueuePayload(
     "shortJobId",
     "driveFileId",
     "shortOutputRevision",
+    "error",
   ] as const) {
     if (
       !(key in incoming) &&
@@ -94,6 +96,74 @@ export function mergeHubQueuePayload(
   }
 
   return merged;
+}
+
+/** Best-effort failure text from payload.error or per-output errors. */
+export function queuePayloadFailureMessage(
+  payload: Record<string, unknown>,
+): string | undefined {
+  if (typeof payload.error === "string" && payload.error.trim()) {
+    return payload.error.trim();
+  }
+  const outputs =
+    payload.outputs && typeof payload.outputs === "object"
+      ? (payload.outputs as Record<string, { error?: unknown }>)
+      : null;
+  if (!outputs) return undefined;
+  for (const key of ["carousel", "photo", "short"] as const) {
+    const err = outputs[key]?.error;
+    if (typeof err === "string" && err.trim()) return err.trim();
+  }
+  return undefined;
+}
+
+/** Failed Hub rows must always carry an inspectable error string. */
+export function withQueueFailureError(
+  payload: Record<string, unknown>,
+  status: string,
+): Record<string, unknown> {
+  if (status !== "failed") {
+    if (payload.error == null) return payload;
+    const next = { ...payload };
+    delete next.error;
+    return next;
+  }
+  const message = queuePayloadFailureMessage(payload);
+  if (message) {
+    if (payload.error === message) return payload;
+    return { ...payload, error: message };
+  }
+  return { ...payload, error: "Processing failed." };
+}
+
+/** Merge a job-create payload onto an existing Hub queue row. */
+export function mergeQueuePayloadForJob(
+  priorPayload: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  jobId: string,
+  opts?: { preserveOutputs?: boolean },
+): Record<string, unknown> {
+  const priorOutputs =
+    priorPayload.outputs && typeof priorPayload.outputs === "object"
+      ? priorPayload.outputs
+      : undefined;
+  const incomingBunny =
+    incoming.bunnyUrls && typeof incoming.bunnyUrls === "object"
+      ? (incoming.bunnyUrls as Record<string, unknown>)
+      : {};
+  const priorBunny =
+    priorPayload.bunnyUrls && typeof priorPayload.bunnyUrls === "object"
+      ? (priorPayload.bunnyUrls as Record<string, unknown>)
+      : {};
+  const next: Record<string, unknown> = {
+    ...priorPayload,
+    ...incoming,
+    processingJobId: jobId,
+    ...(opts?.preserveOutputs && priorOutputs ? { outputs: priorOutputs } : {}),
+    bunnyUrls: { ...priorBunny, ...incomingBunny },
+  };
+  delete next.error;
+  return next;
 }
 
 function outputsStillInFlight(payload: Record<string, unknown>): boolean {

@@ -65,6 +65,15 @@ export type MultiplierQueuePayload = {
   driveFileId?: string;
   /** Per-output process status + ready-to-schedule flags. */
   outputs?: MultiplierOutputsState;
+  /** Last failure message when status is failed. */
+  error?: string;
+  /** Which studio outputs the user asked for (carousel / image / X / short). */
+  studioOutputs?: {
+    carousel: boolean;
+    imagePost: boolean;
+    xPost: boolean;
+    reelShort: boolean;
+  };
 };
 
 /** Wire shape of an item as returned by the Hub. */

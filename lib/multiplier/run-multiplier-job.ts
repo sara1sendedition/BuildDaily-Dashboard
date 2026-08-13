@@ -114,10 +114,31 @@ async function patchQueueOutputs(opts: {
       : {}),
     ...(opts.extraPayload ?? {}),
   };
+  const nextStatus =
+    opts.status ?? aggregateQueueStatusFromOutputs(mergedOutputs);
+  if (nextStatus === "failed") {
+    const fromOutputs =
+      mergedOutputs.carousel?.error ||
+      mergedOutputs.photo?.error ||
+      mergedOutputs.short?.error;
+    const extraErr =
+      typeof opts.extraPayload?.error === "string"
+        ? opts.extraPayload.error
+        : undefined;
+    nextPayload.error =
+      extraErr?.trim() ||
+      (typeof fromOutputs === "string" && fromOutputs.trim()
+        ? fromOutputs.trim()
+        : typeof nextPayload.error === "string" && nextPayload.error.trim()
+          ? nextPayload.error.trim()
+          : "Processing failed.");
+  } else {
+    delete nextPayload.error;
+  }
   await prisma.multiplierQueueItem.update({
     where: { id: opts.queueItemId },
     data: {
-      status: opts.status ?? aggregateQueueStatusFromOutputs(mergedOutputs),
+      status: nextStatus,
       ...(opts.kind !== undefined ? { kind: opts.kind } : {}),
       payload: nextPayload as Prisma.InputJsonValue,
     },
@@ -212,6 +233,44 @@ type ShortPollResult =
   | { status: "failed"; error: string }
   | { status: "processing" };
 
+/** Download the completed Short MP4; retries cover race where status flips before the file is ready. */
+async function downloadShortReelBuffer(
+  base: string,
+  jobId: string,
+): Promise<{ ok: true; buffer: Buffer } | { ok: false; error: string }> {
+  const url = `${base}/api/jobs/${encodeURIComponent(jobId)}/download`;
+  let lastError = "Short download failed.";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, 1500 * attempt));
+    }
+    try {
+      const dl = await fetch(url, { cache: "no-store" });
+      if (dl.ok) {
+        const buf = Buffer.from(await dl.arrayBuffer());
+        if (buf.length > 0) return { ok: true, buffer: buf };
+        lastError = "Short download returned an empty MP4.";
+        continue;
+      }
+      const body = await dl.text().catch(() => "");
+      lastError = `Short download failed (${dl.status})${
+        body ? `: ${body.slice(0, 160)}` : ""
+      }`;
+      // 404 "Output not ready" / "File missing" is often transient right after completed.
+      if (dl.status === 404 || dl.status === 409 || dl.status >= 500) {
+        continue;
+      }
+      return { ok: false, error: lastError };
+    } catch (e) {
+      lastError =
+        e instanceof Error
+          ? `Short download failed: ${e.message}`
+          : "Short download failed.";
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
 async function pollShortJobUntilDone(
   jobId: string,
   timeoutMs: number,
@@ -253,23 +312,17 @@ async function pollShortJobUntilDone(
           : typeof j.output_revision === "number"
             ? j.output_revision
             : undefined;
-      try {
-        const dl = await fetch(
-          `${base}/api/jobs/${encodeURIComponent(jobId)}/download`,
-          { cache: "no-store" },
-        );
-        if (dl.ok) {
-          const buf = Buffer.from(await dl.arrayBuffer());
-          return {
-            status: "completed",
-            outputRevision: revision,
-            reelBuffer: buf,
-          };
-        }
-      } catch {
-        /* fall through */
+      const dl = await downloadShortReelBuffer(base, jobId);
+      if (dl.ok) {
+        return {
+          status: "completed",
+          outputRevision: revision,
+          reelBuffer: dl.buffer,
+        };
       }
-      return { status: "completed", outputRevision: revision };
+      // Never report completed without bytes — callers would mark Short "done"
+      // with no reelMp4Url (or the opaque "no reel MP4 was returned" failure).
+      return { status: "failed", error: dl.error };
     }
     if (status === "failed" || status === "error") {
       const err =
@@ -744,7 +797,8 @@ export async function runMultiplierProcessingJob(opts: {
           await bump(
             withOutput("short", {
               status: "failed",
-              error: "Short completed but no reel MP4 was returned.",
+              error:
+                "Short download failed: completed encode but no reel MP4 was returned.",
               attempts: (opts.attempts ?? 0) + 1,
             }),
             { extraPayload: { shortJobId } },
@@ -842,17 +896,43 @@ export async function runMultiplierProcessingJob(opts: {
   }
 }
 
+function shortNeedsReelFinalize(
+  short: MultiplierOutputState | undefined,
+  payload: Record<string, unknown>,
+): boolean {
+  if (!short) return false;
+  if (short.status === "processing") return true;
+  // Aggregate row can be `done` when carousel/photo succeeded but Short failed
+  // after a completed encode with a missed MP4 download — retry while job id lives.
+  if (short.status !== "failed") return false;
+  const bunny =
+    payload.bunnyUrls && typeof payload.bunnyUrls === "object"
+      ? (payload.bunnyUrls as Record<string, unknown>)
+      : {};
+  if (typeof bunny.reelMp4Url === "string" && bunny.reelMp4Url.trim()) {
+    return false;
+  }
+  const err = typeof short.error === "string" ? short.error.toLowerCase() : "";
+  return (
+    err.includes("no reel mp4") ||
+    err.includes("download failed") ||
+    err.includes("empty mp4") ||
+    err.includes("output not ready") ||
+    err.includes("file missing")
+  );
+}
+
 /** Finish in-flight Shorts that were left processing after a prior tick. */
 export async function finalizeInFlightShortOutputs(opts: {
   limit?: number;
 }): Promise<number> {
   const limit = opts.limit ?? 8;
-  // Include `failed` rows whose short output is still `processing` (e.g. after
-  // download timeout left the Short half-started).
+  // Include `failed` / `done` rows whose Short still needs a reel (missed download
+  // after encode, or half-started after a Bunny ingest timeout).
   const rows = await prisma.multiplierQueueItem.findMany({
-    where: { status: { in: ["processing", "failed"] } },
+    where: { status: { in: ["processing", "failed", "done"] } },
     orderBy: { updatedAt: "asc" },
-    take: 60,
+    take: 80,
   });
   let finished = 0;
   for (const row of rows) {
@@ -866,10 +946,34 @@ export async function finalizeInFlightShortOutputs(opts: {
         ? (payload.outputs as MultiplierOutputsState)
         : undefined;
     const short = outputs?.short;
-    if (!short || short.status !== "processing") continue;
+    if (!short || !shortNeedsReelFinalize(short, payload)) continue;
     const shortJobId =
       typeof payload.shortJobId === "string" ? payload.shortJobId.trim() : "";
     if (!shortJobId) continue;
+
+    const shortAttempts =
+      typeof short.attempts === "number" && Number.isFinite(short.attempts)
+        ? short.attempts
+        : 0;
+    // Cap download retries so a permanently missing file cannot spin forever.
+    if (short.status === "failed" && shortAttempts >= 4) continue;
+
+    // Mark processing so a concurrent tick does not double-download the same job.
+    if (short.status === "failed") {
+      await patchQueueOutputs({
+        queueItemId: row.id,
+        userId: row.userId,
+        outputs: {
+          short: {
+            status: "processing",
+            progress: "Retrying Short download…",
+            error: undefined,
+            attempts: shortAttempts,
+          },
+        },
+        extraPayload: { shortJobId },
+      });
+    }
 
     const result = await pollShortJobUntilDone(shortJobId, 90_000);
     if (result.status === "processing") continue;
@@ -963,8 +1067,10 @@ export async function finalizeInFlightShortOutputs(opts: {
           short: {
             status: "failed",
             error: err,
+            attempts: shortAttempts + 1,
           },
         },
+        extraPayload: { shortJobId },
       });
       finished += 1;
       continue;
@@ -993,8 +1099,10 @@ export async function finalizeInFlightShortOutputs(opts: {
                 e instanceof Error
                   ? e.message
                   : "Failed to upload Short to Bunny.",
+              attempts: shortAttempts + 1,
             },
           },
+          extraPayload: { shortJobId },
         });
         finished += 1;
         continue;
@@ -1007,7 +1115,9 @@ export async function finalizeInFlightShortOutputs(opts: {
         outputs: {
           short: {
             status: "failed",
-            error: "Short completed but no reel MP4 was returned.",
+            error:
+              "Short download failed: completed encode but no reel MP4 was returned.",
+            attempts: shortAttempts + 1,
           },
         },
         extraPayload: { shortJobId },

@@ -69,6 +69,13 @@ export function formatMetaUserFacingMessage(err: MetaGraphError): string {
   const e = err.body.error;
   const base = (e?.message ?? err.message).trim();
   const parts: string[] = [base];
+  if (typeof e?.code === "number" || typeof e?.error_subcode === "number") {
+    const codeBits = [
+      typeof e?.code === "number" ? `code ${e.code}` : null,
+      typeof e?.error_subcode === "number" ? `subcode ${e.error_subcode}` : null,
+    ].filter(Boolean);
+    parts.push(`(${codeBits.join(", ")})`);
+  }
   if (e?.fbtrace_id) {
     parts.push(`Meta trace id: ${e.fbtrace_id}`);
   }

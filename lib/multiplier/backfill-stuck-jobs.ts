@@ -5,6 +5,7 @@ import {
   MULTIPLIER_JOB_TYPE,
   parseMultiplierJobPayload,
 } from "@/lib/multiplier/process-job-types";
+import { findActiveMultiplierJob } from "@/lib/multiplier/find-active-job";
 import {
   aggregateQueueStatusFromOutputs,
   buildInitialOutputs,
@@ -30,9 +31,9 @@ type QueuePayload = {
 
 /**
  * Create ProcessingJobs for Hub queue rows that have a source (Bunny URL or
- * Drive id) and status processing/failed, but never got a durable job id.
+ * Drive id) and status processing, but never got a durable job id.
  * Fixes the Hub-proxy 404 era where the browser fell back to tab processing
- * and left rows stuck without server work.
+ * and left rows stuck without server work. Failed rows are left failed.
  */
 export async function backfillStuckMultiplierProcessingJobs(opts?: {
   limit?: number;
@@ -40,7 +41,9 @@ export async function backfillStuckMultiplierProcessingJobs(opts?: {
   const limit = Math.max(1, Math.min(40, Math.floor(opts?.limit ?? 20)));
   const rows = await prisma.multiplierQueueItem.findMany({
     where: {
-      status: { in: ["processing", "failed"] },
+      // Terminal failures stay failed until the user retries. Auto-creating
+      // jobs for `failed` rows is what turned Hub cron into a job storm.
+      status: "processing",
     },
     orderBy: { updatedAt: "asc" },
     take: 80,
@@ -127,6 +130,35 @@ export async function backfillStuckMultiplierProcessingJobs(opts?: {
     const driveFileId =
       typeof payload.driveFileId === "string" ? payload.driveFileId.trim() : "";
     if (!sourceVideoUrl && !driveFileId) {
+      skipped += 1;
+      continue;
+    }
+
+    const active = await findActiveMultiplierJob({
+      userId: row.userId,
+      queueItemId: row.id,
+      sourceVideoUrl: sourceVideoUrl || undefined,
+      driveFileId: driveFileId || undefined,
+    });
+    if (active) {
+      try {
+        await prisma.multiplierQueueItem.update({
+          where: { id: row.id },
+          data: {
+            status: "processing",
+            payload: {
+              ...payload,
+              v: 1,
+              processingJobId: active.id,
+            } as Prisma.InputJsonValue,
+          },
+        });
+      } catch (e) {
+        console.warn(
+          `[backfillStuckMultiplierProcessingJobs] attach failed for ${row.id}:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
       skipped += 1;
       continue;
     }
