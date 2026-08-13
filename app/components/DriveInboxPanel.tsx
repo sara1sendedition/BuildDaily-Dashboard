@@ -116,6 +116,7 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
   const [busy, setBusy] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState(true);
 
   const loadInbox = useCallback(async () => {
     setLoading(true);
@@ -171,8 +172,9 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
   }, []);
 
   useEffect(() => {
-    void loadInbox();
-  }, [loadInbox]);
+    // Only hit Drive when expanded — keeps collapsed default cheap.
+    if (!collapsed) void loadInbox();
+  }, [collapsed, loadInbox]);
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) =>
@@ -231,25 +233,52 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
     }
   };
 
+  const fileCountLabel =
+    mode === "ready" && files.length > 0 ? ` (${files.length})` : "";
+
   return (
     <div className="rounded-2xl border border-stone-200/80 bg-stone-50/80 p-4 text-left shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-stone-900">Google Drive inbox</h3>
         <button
           type="button"
-          onClick={() => void loadInbox()}
-          disabled={loading || busy || disabled}
-          className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+          onClick={() => setCollapsed((c) => !c)}
+          className="flex min-w-0 items-center gap-2 text-left"
+          aria-expanded={!collapsed}
         >
-          {loading ? "Refreshing…" : "Refresh"}
+          <span
+            className="shrink-0 text-stone-400 transition-transform duration-200"
+            style={{ transform: collapsed ? undefined : "rotate(90deg)" }}
+            aria-hidden
+          >
+            ▸
+          </span>
+          <h3 className="text-sm font-semibold text-stone-900">
+            Google Drive inbox{fileCountLabel}
+          </h3>
         </button>
+        {!collapsed ? (
+          <button
+            type="button"
+            onClick={() => void loadInbox()}
+            disabled={loading || busy || disabled}
+            className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+          >
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        ) : null}
       </div>
 
-      {mode === "loading" ? (
+      {collapsed ? (
+        <p className="mt-2 text-xs text-stone-500">
+          Collapsed — click to browse Drive clips.
+        </p>
+      ) : null}
+
+      {!collapsed && mode === "loading" ? (
         <p className="mt-2 text-xs text-stone-500">Checking Drive inbox…</p>
       ) : null}
 
-      {mode === "missing-api" ? (
+      {!collapsed && mode === "missing-api" ? (
         <p className="mt-2 text-xs text-amber-800">
           Drive import is not deployed on this app yet. Redeploy{" "}
           <strong>ContentMultiplier</strong> from GitHub (commit{" "}
@@ -258,7 +287,7 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
         </p>
       ) : null}
 
-      {mode === "not-configured" ? (
+      {!collapsed && mode === "not-configured" ? (
         <p className="mt-2 text-xs text-stone-600">
           Drive inbox is not configured on the <strong>Video to Short</strong>{" "}
           backend. In Coolify, set{" "}
@@ -274,7 +303,7 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
         </p>
       ) : null}
 
-      {mode === "ready" ? (
+      {!collapsed && mode === "ready" ? (
         <>
           {error ? (
             <p className="mt-2 text-xs text-red-700 whitespace-pre-wrap">{error}</p>
@@ -347,7 +376,7 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
         </>
       ) : null}
 
-      {mode === "error" && error ? (
+      {!collapsed && mode === "error" && error ? (
         <p className="mt-2 text-xs text-red-700 whitespace-pre-wrap">{error}</p>
       ) : null}
     </div>
