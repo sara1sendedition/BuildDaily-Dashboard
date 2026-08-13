@@ -1,0 +1,5 @@
+# Coolify / Nixpacks. Hub carousel + image-post spawn ffprobe/ffmpeg
+# in this Node process (Video to Short's image already has FFmpeg).
+[phases.setup]
+aptPkgs = ["ffmpeg"]
+nixPkgs = ["ffmpeg"]

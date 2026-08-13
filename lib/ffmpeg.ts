@@ -65,13 +65,14 @@ export function coverCropColorVf(
   return `${geo},${frameColorAdjustFilterChain(color)}`;
 }
 
-/** Prefer Homebrew paths when `ffmpeg` is not on the process PATH (common in GUI-launched apps on macOS). */
+/** Prefer known install paths when `ffmpeg` is not on the process PATH. */
 function resolveBinary(name: "ffmpeg" | "ffprobe"): string {
-  if (process.platform === "darwin") {
-    const candidates = [`/opt/homebrew/bin/${name}`, `/usr/local/bin/${name}`];
-    for (const p of candidates) {
-      if (existsSync(p)) return p;
-    }
+  const candidates =
+    process.platform === "darwin"
+      ? [`/opt/homebrew/bin/${name}`, `/usr/local/bin/${name}`]
+      : [`/usr/bin/${name}`, `/usr/local/bin/${name}`];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
   }
   return name;
 }
