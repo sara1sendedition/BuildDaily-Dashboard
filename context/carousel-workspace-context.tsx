@@ -49,6 +49,12 @@ import {
 } from "@/lib/default-caption-cta";
 import { isMobileClient, useMobileProcessingWakeLock } from "@/lib/mobile-client";
 import {
+  appendCarouselVideoIngestFields,
+  hasCarouselVideoSource,
+  storedSourceVideoUrl,
+  type CarouselVideoIngestOpts,
+} from "@/lib/carousel-video-source";
+import {
   appendLearnedFromEditsLines,
   buildCarouselLearningLines,
   cloneSlidesForLearningBaseline,
@@ -56,6 +62,7 @@ import {
   mergeCopyContextWithLearnings,
 } from "@/lib/learned-from-edits";
 import { appendVisualReferenceFormFields } from "@/lib/visual-reference-storage";
+import { studioContentFingerprint } from "@/lib/multiplier/output-delivery-status";
 import { clientApiPath } from "@/lib/client-api-path";
 import {
   uploadFileToBunnyStorage,
@@ -72,6 +79,7 @@ import {
 import {
   deleteMultiplierQueueItemFromHub,
   listMultiplierQueueFromHub,
+  patchMultiplierQueueItemOnHub,
   upsertMultiplierQueueItemToHub,
   type HubMultiplierQueueItem,
   type MultiplierQueueKind,
@@ -79,12 +87,19 @@ import {
   type ImagePostCopyPayload,
 } from "@/lib/multiplier-queue/hub-client";
 import {
+  createMultiplierProcessingJob,
+  kickMultiplierProcessingDue,
+} from "@/lib/multiplier-queue/processing-jobs-client";
+import {
   failedOutputSummary,
   localQueueStatusFromHub,
+  type MultiplierOutputKey,
   type MultiplierOutputsState,
 } from "@/lib/multiplier-queue/output-state";
 import { queueItemScheduleLabel } from "@/lib/queue-display-label";
+import { sanitizeQueueErrorMessage } from "@/lib/multiplier-queue/merge-hub-payload";
 import { parseResponseJson } from "@/lib/parse-response-json";
+import { normalizeTranscriptSegments } from "@/lib/parse-reuse-transcript-json";
 import {
   downloadCompletedShortFile,
   clearInFlightShortJob,
@@ -97,8 +112,11 @@ import {
   reprocessVideoToShortJob,
   type InFlightShortJob,
   runVideoToShortIfEnabled,
+  createShortJobFromDrive,
+  resumeShortJobOutput,
   type StudioShortTextOptions,
 } from "@/lib/run-video-to-short";
+import { pickOutputRevisionFromJobPoll } from "@/lib/short-job-poll-meta";
 import { isLikelyVideoFile } from "@/lib/is-likely-video-file";
 import { incrementVideosMultiplied } from "@/lib/hub/metrics-store";
 import {
@@ -127,11 +145,14 @@ function isQueueProcessingAbort(e: unknown): boolean {
 /** Only auto-resume server-side Short jobs that were interrupted, not hard failures. */
 function shouldAutoResumeShort(
   q: VideoQueueItem,
-  giveUp: ReadonlySet<string>
+  giveUp: ReadonlySet<string>,
+  hasBunnyReel?: boolean,
 ): boolean {
   if (giveUp.has(q.id)) return false;
   if (q.status !== "done" || !q.shortJobId?.trim()) return false;
   if (hasUsableShortOutput(q)) return false;
+  // Preview can use Bunny directly; don't hammer expired Short-job downloads.
+  if (hasBunnyReel) return false;
   if (!q.shortError) return true;
   const err = q.shortError.toLowerCase();
   if (
@@ -296,14 +317,6 @@ const DEFAULT_STUDIO_OUTPUTS: StudioOutputToggles = {
   reelShort: true,
 };
 
-/** Video Editor / short-only runs — no carousel, image post, or X/Threads. */
-export const SHORT_ONLY_STUDIO_OUTPUTS: StudioOutputToggles = {
-  carousel: false,
-  imagePost: false,
-  xPost: false,
-  reelShort: true,
-};
-
 export type VideoQueueItem = {
   id: string;
   /**
@@ -312,15 +325,23 @@ export type VideoQueueItem = {
    * this with the Video to Short export or keyframes will pick up burned-in captions.
    */
   file: File;
+  /**
+   * Google Drive inbox file id for server-side ingest. When set, `file` is a
+   * zero-byte placeholder (name/type only) and every processing call sends
+   * this id instead of video bytes — the servers pull the video from Drive
+   * directly. Avoids round-tripping large videos through the browser.
+   */
+  driveFileId?: string;
+  /**
+   * Video-to-Short stitch job id. When set, `file` is a zero-byte placeholder
+   * and the Hub worker waits for stitch then downloads the MP4 — no browser
+   * round-trip of the stitched file.
+   */
+  stitchJobId?: string;
   /** User-renamed title (queue + calendar); does not change the underlying file. */
   displayLabel?: string;
   /** Optional per-video run notes for AI (stitch handoff or custom enqueue). */
   aiInstructions?: string;
-  /**
-   * Optional per-item output overrides (e.g. Video Editor short-only). When set,
-   * the queue loop uses these instead of the global Multiplier toggles.
-   */
-  studioOutputs?: StudioOutputToggles;
   status: "pending" | "processing" | "done" | "error";
   error?: string;
   /** Latest Video to Short / pipeline step message while processing. */
@@ -338,8 +359,19 @@ export type VideoQueueItem = {
   shortEditorialSkip?: string | null;
   /** Per-cut smart editorial detail from Video to Short job JSON (`editorial_cuts`). */
   shortEditorialCuts?: unknown | null;
+  /** Mirrors Video to Short `meta.output_revision` — busts stale Bunny previews after re-run. */
+  shortOutputRevision?: number | null;
   /** Set when Reel was requested but failed or was skipped (carousel may still be done). */
   shortError?: string;
+  /**
+   * Fingerprint of studio copy/assets when processing first finished — used on
+   * the calendar “Ready to schedule” list to show an Edited badge after changes.
+   */
+  studioContentBaseline?: string;
+  /** Durable Hub ProcessingJob id when using server-side queue. */
+  processingJobId?: string | null;
+  /** True when this row is handled by the server worker (survives tab close). */
+  durableProcessing?: boolean;
   /** Per-output process + ready-to-schedule state (from Hub payload). */
   outputs?: MultiplierOutputsState;
 };
@@ -404,13 +436,14 @@ export type QueueCarouselSnapshot = {
   processTiming?: ProcessTiming | null;
   /** Brightness / hue / saturation applied to carousel frames and image-post source frame. */
   frameColorAdjust: FrameColorAdjust;
-  /**
-   * Bunny.net URLs for slide PNGs / image-post JPEG, populated by the
+  /** Bunny.net URLs for slide PNGs / image-post JPEG, populated by the
    * post-process auto-upload effect in `ScheduleProvider`-adjacent code.
    * Persisted to Hub `ScheduleEntry.payload` at schedule time so publish
    * paths can pass URLs to Meta instead of base64. Phase 2.0.
    */
   bunnyUrls?: BunnyAssetUrls;
+  /** Bumped on each slide PNG re-render so Bunny uploads use fresh object keys. */
+  slidesAssetVersion?: number;
 };
 
 type CarouselWorkspaceValue = {
@@ -423,10 +456,12 @@ type CarouselWorkspaceValue = {
     files: File[],
     opts?: {
       aiInstructionsByIndex?: Array<string | undefined>;
-      /** Override Multiplier toggles for this batch (e.g. short-only Video Editor). */
-      studioOutputs?: StudioOutputToggles;
+      /** Drive inbox ids for server-side ingest (parallel to `files`). */
+      driveFileIdsByIndex?: Array<string | undefined>;
+      /** Stitch job ids for server-side ingest (parallel to `files`). */
+      stitchJobIdsByIndex?: Array<string | undefined>;
     }
-  ) => string[];
+  ) => void;
   file: File | null;
   /** Short pipeline output for the active queue row, if any (not used for carousel/image). */
   shortOutputFile: File | null;
@@ -437,6 +472,8 @@ type CarouselWorkspaceValue = {
   shortEditorialSkip: string | null;
   shortEditorialCuts: unknown | null;
   shortError: string | null;
+  /** Video to Short `meta.output_revision` for the active row (preview cache bust). */
+  shortOutputRevision: number;
   reelMp4Url: string | null;
   /** True while a stored shortJobId is being polled/downloaded in the background. */
   shortResumeBusy: boolean;
@@ -445,7 +482,9 @@ type CarouselWorkspaceValue = {
   attachRecoveredShortFile: (sourceName: string, file: File) => void;
   recoverInFlightShortForQueue: (record: InFlightShortJob) => Promise<void>;
   shortReprocessBusy: boolean;
-  reprocessActiveShortOutput: (text: StudioShortTextOptions) => Promise<void>;
+  /** Server progress while `reprocessActiveShortOutput` is in flight. */
+  shortReprocessProgress: string | null;
+  reprocessActiveShortOutput: (text: StudioShortTextOptions) => Promise<boolean>;
   layoutId: LayoutId;
   setLayoutId: (v: LayoutId) => void;
   carouselOverride: CarouselType | "";
@@ -472,6 +511,8 @@ type CarouselWorkspaceValue = {
   reRenderLoading: boolean;
   /** Human-readable status while `reRenderZip` is in flight. */
   reRenderProgress: string | null;
+  /** Last rebuild failure (shown near the Rebuild slide images control). */
+  reRenderError: string | null;
   backgroundSource: BackgroundSource;
   setBackgroundSource: (v: BackgroundSource) => void;
   backgroundFile: File | null;
@@ -487,6 +528,12 @@ type CarouselWorkspaceValue = {
   removeSlide: (index: number) => void;
   addSlide: () => void;
   moveSlide: (fromIndex: number, toIndex: number) => void;
+  /** True when slide copy can be baked into PNGs (local file, Drive ingest, or stored source URL). */
+  canReRenderZip: boolean;
+  /** True when image-post copy can be regenerated (needs transcript + video source). */
+  canRegenerateImagePostCopy: boolean;
+  /** True when hook/micro/color can be baked into the image-post PNG. */
+  canRerenderImagePostOverlay: boolean;
   reRenderZip: () => Promise<void>;
   downloadZip: () => void;
   /** Bundle every completed queue item’s carousel zip into one download (needs ≥2 finished videos). */
@@ -501,7 +548,10 @@ type CarouselWorkspaceValue = {
   patchImagePost: (patch: Partial<ImagePostSnapshot>) => void;
   downloadImagePostPng: () => void;
   regenerateImagePostCopy: () => Promise<void>;
-  rerenderImagePostOverlay: (hook: string, microCta: string) => Promise<boolean>;
+  rerenderImagePostOverlay: (
+    hook: string,
+    microCta: string
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Re-render image post with current hook/micro and latest frame color (no LLM). */
   applyImagePostFrameColor: () => Promise<boolean>;
   frameColorAdjust: FrameColorAdjust;
@@ -520,18 +570,20 @@ type CarouselWorkspaceValue = {
   studioOutputs: StudioOutputToggles;
   setStudioOutputs: Dispatch<SetStateAction<StudioOutputToggles>>;
   /**
-   * True after the one-shot Hub queue hydration attempt finishes (success,
-   * empty list, or failure). Stitch handoff consumers wait on this so they
-   * do not re-enqueue while hydrated stubs are still loading.
-   */
-  hubQueueHydrationDone: boolean;
-  /**
    * Phase 3.B — fetch a hydrated queue item's source video from Bunny and
    * replace its stub File with a real one. Returns the upgraded File on
    * success or `null` if no URL / fetch fails. UI callers should invoke
    * this before flows that need the raw video bytes.
    */
   rehydrateSourceVideoFile: (queueItemId: string) => Promise<File | null>;
+  /** Mark a single Multiplier output ready (or not) for the Schedule page. */
+  setOutputReadyToSchedule: (
+    queueItemId: string,
+    output: MultiplierOutputKey,
+    ready: boolean,
+  ) => Promise<void>;
+  /** True after the first Hub queue list attempt finishes (ok, empty, or failed). */
+  hubQueueHydrationDone: boolean;
 };
 
 const CarouselWorkspaceContext = createContext<CarouselWorkspaceValue | null>(
@@ -547,6 +599,12 @@ async function postProcessAndBuildSnapshot(
     backgroundFile: File | null;
     frameColorAdjust?: FrameColorAdjust;
     signal?: AbortSignal;
+    /** Server-side ingest: send this Drive inbox id instead of video bytes. */
+    driveFileId?: string;
+    /** Server-side ingest: reuse this job's already-downloaded source video. */
+    sourceJobId?: string;
+    /** Stored Bunny URL when the browser only has a zero-byte placeholder File. */
+    sourceVideoUrl?: string;
     /** Skip Whisper when re-running process with the same video + transcript (Edit Carousel). */
     reuseTranscription?: boolean;
     existingTranscript?: {
@@ -565,20 +623,21 @@ async function postProcessAndBuildSnapshot(
       : null;
 
   const fd = new FormData();
-  fd.append("video", videoFile);
+  appendCarouselVideoIngestFields(fd, videoFile, {
+    driveFileId: opts.driveFileId,
+    sourceJobId: opts.sourceJobId,
+    sourceVideoUrl: opts.sourceVideoUrl,
+  });
   if (bgSource === "own_background" && bgFile) {
     fd.append("background", bgFile);
   }
   fd.append("layoutId", opts.layoutId);
   fd.append("brandingId", DEFAULT_BRANDING_ID);
   if (opts.carouselOverride) fd.append("carouselType", opts.carouselOverride);
-  if (
-    opts.reuseTranscription &&
-    opts.existingTranscript &&
-    opts.existingTranscript.length > 0
-  ) {
+  const reuseTranscript = normalizeTranscriptSegments(opts.existingTranscript);
+  if (opts.reuseTranscription && reuseTranscript) {
     fd.append("reuseTranscription", "1");
-    fd.append("transcript", JSON.stringify(opts.existingTranscript));
+    fd.append("transcript", JSON.stringify(reuseTranscript));
   }
 
   const copyCtx = getCopyContextFromStorage().trim();
@@ -602,6 +661,13 @@ async function postProcessAndBuildSnapshot(
     fd.append(
       "carouselFocus",
       carouselFocus.slice(0, MAX_CAROUSEL_FOCUS_CHARS)
+    );
+  }
+  const sources = getReferenceSourcesFromStorage().trim();
+  if (sources) {
+    fd.append(
+      "referenceSources",
+      sources.slice(0, MAX_REFERENCE_SOURCES_CHARS)
     );
   }
   appendVisualReferenceFormFields(fd);
@@ -653,14 +719,7 @@ async function postProcessAndBuildSnapshot(
     ? (slidesRaw as ApiSlide[])
     : [];
   const tr = data.transcript;
-  const transcript = Array.isArray(tr)
-    ? (tr as {
-        id: number;
-        text: string;
-        startSec: number;
-        endSec: number;
-      }[])
-    : [];
+  const transcript = normalizeTranscriptSegments(tr) ?? [];
   const durationSec =
     typeof data.durationSec === "number" ? data.durationSec : null;
   const z = typeof data.zipBase64 === "string" ? data.zipBase64 : null;
@@ -784,10 +843,20 @@ async function postImagePostFromVideo(
     };
     frameColorAdjust?: FrameColorAdjust;
     signal?: AbortSignal;
+    /** Server-side ingest: send this Drive inbox id instead of video bytes. */
+    driveFileId?: string;
+    /** Server-side ingest: reuse this job's already-downloaded source video. */
+    sourceJobId?: string;
+    /** Stored Bunny URL when the browser only has a zero-byte placeholder File. */
+    sourceVideoUrl?: string;
   }
 ): Promise<ImagePostSnapshot> {
   const fd = new FormData();
-  fd.append("video", videoFile);
+  appendCarouselVideoIngestFields(fd, videoFile, {
+    driveFileId: options?.driveFileId,
+    sourceJobId: options?.sourceJobId,
+    sourceVideoUrl: options?.sourceVideoUrl,
+  });
   const copyCtx = getCopyContextFromStorage().trim();
   const learnedBlob = getLearnedFromEditsBlob().trim();
   const mergedImgCopy = mergeCopyContextWithStudioRunNotes(
@@ -824,9 +893,10 @@ async function postImagePostFromVideo(
   if (feedback) {
     fd.append("copyFeedback", feedback.slice(0, MAX_COPY_FEEDBACK_CHARS));
   }
-  if (transcript.length > 0) {
+  const reuseTranscript = normalizeTranscriptSegments(transcript);
+  if (reuseTranscript) {
     fd.append("reuseTranscription", "1");
-    fd.append("transcript", JSON.stringify(transcript));
+    fd.append("transcript", JSON.stringify(reuseTranscript));
   }
   const prev = options?.previousPlan;
   if (feedback && prev) {
@@ -865,9 +935,10 @@ async function postImagePostFromVideo(
     evidenceSegmentIds: Array.isArray(data.evidenceSegmentIds)
       ? (data.evidenceSegmentIds as number[])
       : [],
-    transcript: Array.isArray(data.transcript)
-      ? (data.transcript as ImagePostSnapshot["transcript"])
-      : transcript,
+    transcript:
+      normalizeTranscriptSegments(data.transcript) ??
+      normalizeTranscriptSegments(transcript) ??
+      [],
     durationSec: typeof data.durationSec === "number" ? data.durationSec : 0,
     frameTimeSec: typeof data.frameTimeSec === "number" ? data.frameTimeSec : 0,
     imageBase64: data.imageBase64,
@@ -876,10 +947,11 @@ async function postImagePostFromVideo(
 
 async function postVideoTranscript(
   videoFile: File,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  ingest?: CarouselVideoIngestOpts
 ): Promise<QueueCarouselSnapshot["transcript"]> {
   const fd = new FormData();
-  fd.append("video", videoFile);
+  appendCarouselVideoIngestFields(fd, videoFile, ingest ?? {});
   const res = await fetch(clientApiPath("/api/transcribe"), {
     method: "POST",
     body: fd,
@@ -895,10 +967,11 @@ async function postVideoTranscript(
     );
   }
   const tr = data.transcript;
-  if (!Array.isArray(tr) || tr.length === 0) {
+  const normalized = normalizeTranscriptSegments(tr);
+  if (!normalized) {
     throw new Error("Transcription returned no segments.");
   }
-  return tr;
+  return normalized;
 }
 
 type StudioParallelOutputs = {
@@ -968,14 +1041,17 @@ async function postCarouselAndImagePost(
     social: X_THREADS_OUTPUT_ENABLED,
   };
 
+  const normalizedExisting = normalizeTranscriptSegments(opts.existingTranscript);
   const reuse =
-    opts.reuseTranscription === true &&
-    Array.isArray(opts.existingTranscript) &&
-    opts.existingTranscript.length > 0;
+    opts.reuseTranscription === true && normalizedExisting !== null;
 
   const sharedTranscript: QueueCarouselSnapshot["transcript"] = reuse
-    ? opts.existingTranscript!
-    : await postVideoTranscript(videoFile, opts.signal);
+    ? normalizedExisting!
+    : await postVideoTranscript(videoFile, opts.signal, {
+        driveFileId: opts.driveFileId,
+        sourceJobId: opts.sourceJobId,
+        sourceVideoUrl: opts.sourceVideoUrl,
+      });
 
   const parallelOpts = {
     ...opts,
@@ -1031,6 +1107,9 @@ async function postCarouselAndImagePost(
           frameColorAdjust:
             parallelOpts.frameColorAdjust ?? DEFAULT_FRAME_COLOR_ADJUST,
           signal: opts.signal,
+          driveFileId: opts.driveFileId,
+          sourceJobId: opts.sourceJobId,
+          sourceVideoUrl: opts.sourceVideoUrl,
         });
         imagePostError = null;
         doneLabels.add("image post");
@@ -1112,6 +1191,9 @@ async function postCarouselAndImagePost(
         frameColorAdjust:
           parallelOpts.frameColorAdjust ?? DEFAULT_FRAME_COLOR_ADJUST,
         signal: opts.signal,
+        driveFileId: opts.driveFileId,
+        sourceJobId: opts.sourceJobId,
+        sourceVideoUrl: opts.sourceVideoUrl,
       }).then((snap) => {
         doneLabels.add("image post");
         reportParallelProgress();
@@ -1199,8 +1281,11 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   );
   const [effectiveType, setEffectiveType] = useState<CarouselType | null>(null);
   const [editableSlides, setEditableSlides] = useState<ApiSlide[]>([]);
-  /** Latest slide copy for re-render; avoids a stale `reRenderZip` closure missing the last keystroke. */
+  /** Latest slide copy for re-render; kept in sync inside slide editors (not only in useEffect). */
   const editableSlidesRef = useRef<ApiSlide[]>([]);
+  const transcriptRef = useRef<QueueCarouselSnapshot["transcript"]>([]);
+  const previewRenderEpochRef = useRef(0);
+  const reRenderInFlightRef = useRef(false);
   /** Headline/body snapshot for auto-diff learnings when user rebuilds slide images. */
   const carouselTextBaselineForLearningRef = useRef<
     ReturnType<typeof cloneSlidesForLearningBaseline>
@@ -1221,8 +1306,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const [socialCaption, setSocialCaption] = useState("");
   const [reRenderLoading, setReRenderLoading] = useState(false);
   const [reRenderProgress, setReRenderProgress] = useState<string | null>(null);
+  const [reRenderError, setReRenderError] = useState<string | null>(null);
   const [downloadAllZipsLoading, setDownloadAllZipsLoading] = useState(false);
   const [shortReprocessBusy, setShortReprocessBusy] = useState(false);
+  const [shortReprocessProgress, setShortReprocessProgress] = useState<
+    string | null
+  >(null);
   const [shortResumeBusy, setShortResumeBusy] = useState(false);
   const [shortResumeMessage, setShortResumeMessage] = useState<string | null>(
     null
@@ -1255,6 +1344,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const queueRef = useRef<VideoQueueItem[]>([]);
   const queueResultsRef = useRef<Record<string, QueueCarouselSnapshot>>({});
   const processingQueueRef = useRef(false);
+  const processQueueLoopRef = useRef<() => void>(() => undefined);
   const queueProcessAbortRef = useRef<AbortController | null>(null);
   const activeQueueIdRef = useRef<string | null>(null);
   /** Prevents overlapping Short re-process runs (e.g. double-click before React re-renders). */
@@ -1263,7 +1353,6 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const [studioOutputs, setStudioOutputs] =
     useState<StudioOutputToggles>(DEFAULT_STUDIO_OUTPUTS);
   const studioOutputsRef = useRef<StudioOutputToggles>(DEFAULT_STUDIO_OUTPUTS);
-  const [hubQueueHydrationDone, setHubQueueHydrationDone] = useState(false);
 
   useEffect(() => {
     studioOutputsRef.current = studioOutputs;
@@ -1289,6 +1378,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   useEffect(() => {
     editableSlidesRef.current = editableSlides;
   }, [editableSlides]);
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
   useEffect(() => {
     imagePostFrameTimeRef.current = imagePost?.frameTimeSec;
   }, [imagePost?.frameTimeSec]);
@@ -1323,6 +1415,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       const slides = snap.slidePreviewBase64s ?? [];
       const slidesIg = snap.slidePreviewBase64sInstagram ?? [];
       const imagePost = snap.imagePost?.imageBase64 ?? null;
+      const slideVersion = snap.slidesAssetVersion ?? 0;
       const needsSlideUpload =
         slides.length > 0 && !(bunny?.slideUrls?.length ?? 0);
       const needsSlideIgUpload =
@@ -1334,15 +1427,18 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       }
 
       bunnyUploadInFlightRef.current.add(queueId);
+      const slideVersionAtStart = slideVersion;
       (async () => {
         try {
           const [slideUrlsRaw, slideUrlsIgRaw, imagePostUrl] = await Promise.all([
             needsSlideUpload
-              ? uploadSlidesToBunnyStorage(slides, { prefix: `${queueId}/slide` })
+              ? uploadSlidesToBunnyStorage(slides, {
+                  prefix: `${queueId}/slide-v${slideVersion}`,
+                })
               : Promise.resolve([] as (string | null)[]),
             needsSlideIgUpload
               ? uploadSlidesToBunnyStorage(slidesIg, {
-                  prefix: `${queueId}/slide-ig`,
+                  prefix: `${queueId}/slide-ig-v${slideVersion}`,
                 })
               : Promise.resolve([] as (string | null)[]),
             needsImagePostUpload && imagePost
@@ -1362,6 +1458,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           setQueueResults((qr) => {
             const cur = qr[queueId];
             if (!cur) return qr;
+            if ((cur.slidesAssetVersion ?? 0) !== slideVersionAtStart) {
+              return qr;
+            }
             // Don't clobber URLs added by a parallel run.
             const merged: BunnyAssetUrls = {
               ...(cur.bunnyUrls ?? {}),
@@ -1512,8 +1611,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       bunnyReelUploadInFlightRef.current.add(q.id);
       (async () => {
         try {
+          const rev =
+            q.shortOutputRevision != null && q.shortOutputRevision > 0
+              ? q.shortOutputRevision
+              : Date.now();
           const url = await uploadFileToBunnyStorage(reelFile, {
-            filename: `${q.id}/reel.mp4`,
+            filename: `${q.id}/reel-v${rev}.mp4`,
             contentType: "video/mp4",
           });
           if (!url) return;
@@ -1573,6 +1676,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
    * (debounced per id). The Hub treats the payload as opaque Json.
    */
   const MULTIPLIER_HUB_SYNC_DEBOUNCE_MS = 300;
+  const [hubQueueHydrationDone, setHubQueueHydrationDone] = useState(false);
   const hubHydratedRef = useRef<Set<string>>(new Set());
   const hubSyncTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
@@ -1593,7 +1697,6 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       label: queueItemScheduleLabel(q),
       displayLabel: q.displayLabel ?? null,
       short: Boolean(q.shortOutputFile) || Boolean(q.shortJobId),
-      studioOutputs: q.studioOutputs ?? null,
       payload: buildHubPayload(snap, q),
     });
   }
@@ -1678,26 +1781,28 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   function buildHubPayload(
     snap: QueueCarouselSnapshot | undefined,
-    q?: Pick<VideoQueueItem, "shortJobId" | "studioOutputs" | "error">
+    q?: Pick<
+      VideoQueueItem,
+      | "shortJobId"
+      | "shortOutputRevision"
+      | "processingJobId"
+      | "outputs"
+      | "driveFileId"
+      | "stitchJobId"
+      | "error"
+    >,
   ): MultiplierQueuePayload {
-    const studioOutputs =
-      q?.studioOutputs &&
-      typeof q.studioOutputs.carousel === "boolean" &&
-      typeof q.studioOutputs.imagePost === "boolean" &&
-      typeof q.studioOutputs.xPost === "boolean" &&
-      typeof q.studioOutputs.reelShort === "boolean"
-        ? {
-            carousel: q.studioOutputs.carousel,
-            imagePost: q.studioOutputs.imagePost,
-            xPost: q.studioOutputs.xPost,
-            reelShort: q.studioOutputs.reelShort,
-          }
-        : undefined;
     if (!snap) {
       return {
         v: 1,
         ...(q?.shortJobId ? { shortJobId: q.shortJobId } : {}),
-        ...(studioOutputs ? { studioOutputs } : {}),
+        ...(q?.shortOutputRevision != null && q.shortOutputRevision > 0
+          ? { shortOutputRevision: q.shortOutputRevision }
+          : {}),
+        ...(q?.processingJobId ? { processingJobId: q.processingJobId } : {}),
+        ...(q?.driveFileId ? { driveFileId: q.driveFileId } : {}),
+        ...(q?.stitchJobId ? { stitchJobId: q.stitchJobId } : {}),
+        ...(q?.outputs ? { outputs: q.outputs } : {}),
         ...(q?.error ? { error: q.error } : {}),
       };
     }
@@ -1705,7 +1810,13 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       v: 1,
       ...(snap.bunnyUrls ? { bunnyUrls: snap.bunnyUrls } : {}),
       ...(q?.shortJobId ? { shortJobId: q.shortJobId } : {}),
-      ...(studioOutputs ? { studioOutputs } : {}),
+      ...(q?.shortOutputRevision != null && q.shortOutputRevision > 0
+        ? { shortOutputRevision: q.shortOutputRevision }
+        : {}),
+      ...(q?.processingJobId ? { processingJobId: q.processingJobId } : {}),
+      ...(q?.driveFileId ? { driveFileId: q.driveFileId } : {}),
+      ...(q?.stitchJobId ? { stitchJobId: q.stitchJobId } : {}),
+      ...(q?.outputs ? { outputs: q.outputs } : {}),
       ...(q?.error ? { error: q.error } : {}),
       ...(snap.socialCaption ? { socialCaption: snap.socialCaption } : {}),
       ...(() => {
@@ -1722,7 +1833,10 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           }
         : {}),
       ...(snap.transcript && snap.transcript.length > 0
-        ? { transcript: snap.transcript }
+        ? {
+            transcript:
+              normalizeTranscriptSegments(snap.transcript) ?? snap.transcript,
+          }
         : {}),
       ...(snap.effectiveType != null ? { effectiveType: snap.effectiveType } : {}),
       ...(snap.layoutId ? { layoutId: snap.layoutId } : {}),
@@ -1758,82 +1872,104 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         const stubFile = new File([], item.videoLabel || "video.mp4", {
           type: "video/mp4",
         });
-        const payloadProcessingJobId =
-          typeof payload.processingJobId === "string" &&
-          payload.processingJobId.trim()
-            ? payload.processingJobId.trim()
-            : undefined;
-        const payloadSourceVideoUrl =
-          typeof payload.bunnyUrls?.sourceVideoUrl === "string" &&
-          payload.bunnyUrls.sourceVideoUrl.trim()
-            ? payload.bunnyUrls.sourceVideoUrl.trim()
-            : undefined;
-        const payloadDriveFileId =
-          typeof payload.driveFileId === "string" && payload.driveFileId.trim()
-            ? payload.driveFileId.trim()
-            : undefined;
-        const interruptedProcessing =
-          item.status === "processing" &&
-          stubFile.size === 0 &&
-          !payloadProcessingJobId &&
-          !payloadSourceVideoUrl &&
-          !payloadDriveFileId;
         const payloadShortJobId =
           typeof payload.shortJobId === "string" && payload.shortJobId.trim()
             ? payload.shortJobId.trim()
             : undefined;
-        const payloadOutputs =
+        const payloadRevision =
+          typeof payload.shortOutputRevision === "number" &&
+          payload.shortOutputRevision > 0
+            ? Math.floor(payload.shortOutputRevision)
+            : undefined;
+        const processingJobId =
+          typeof payload.processingJobId === "string" &&
+          payload.processingJobId.trim()
+            ? payload.processingJobId.trim()
+            : undefined;
+        const driveFileId =
+          typeof payload.driveFileId === "string" && payload.driveFileId.trim()
+            ? payload.driveFileId.trim()
+            : undefined;
+        const stitchJobId =
+          typeof payload.stitchJobId === "string" && payload.stitchJobId.trim()
+            ? payload.stitchJobId.trim()
+            : undefined;
+        const sourceVideoUrl =
+          typeof payload.bunnyUrls?.sourceVideoUrl === "string" &&
+          payload.bunnyUrls.sourceVideoUrl.trim()
+            ? payload.bunnyUrls.sourceVideoUrl.trim()
+            : undefined;
+        // Stuck overnight batch: Hub row is "processing" with a Bunny URL but
+        // no ProcessingJob (durable create used to 404 via Hub). Re-queue on
+        // the server instead of marking interrupted.
+        const canResumeDurable =
+          !processingJobId &&
+          Boolean(driveFileId || stitchJobId || sourceVideoUrl) &&
+          item.status === "processing";
+        const durableProcessing = Boolean(processingJobId) || canResumeDurable;
+        const interruptedProcessing =
+          item.status === "processing" &&
+          stubFile.size === 0 &&
+          !durableProcessing &&
+          !driveFileId &&
+          !stitchJobId &&
+          !sourceVideoUrl;
+        const outputs =
           payload.outputs && typeof payload.outputs === "object"
             ? payload.outputs
             : undefined;
-        const payloadShortError =
-          payloadOutputs?.short?.status === "failed" &&
-          typeof payloadOutputs.short.error === "string" &&
-          payloadOutputs.short.error.trim()
-            ? payloadOutputs.short.error.trim()
-            : undefined;
-        const payloadStudioOutputs =
-          payload.studioOutputs &&
-          typeof payload.studioOutputs.carousel === "boolean" &&
-          typeof payload.studioOutputs.imagePost === "boolean" &&
-          typeof payload.studioOutputs.xPost === "boolean" &&
-          typeof payload.studioOutputs.reelShort === "boolean"
-            ? {
-                carousel: payload.studioOutputs.carousel,
-                imagePost: payload.studioOutputs.imagePost,
-                xPost: payload.studioOutputs.xPost,
-                reelShort: payload.studioOutputs.reelShort,
-              }
-            : undefined;
-        const queueStatus = localQueueStatusFromHub({
+        const queueStatus: VideoQueueItem["status"] = localQueueStatusFromHub({
           hubStatus: item.status,
-          outputs: payloadOutputs,
+          outputs,
           bunnyUrls: payload.bunnyUrls,
           interrupted: interruptedProcessing,
+          canResume: canResumeDurable,
         });
-        newQueueRows.push({
+        const progressFromOutputs = (() => {
+          if (canResumeDurable) return "Re-queueing on server…";
+          if (!outputs) return undefined;
+          for (const key of ["carousel", "photo", "short"] as const) {
+            const p = outputs[key]?.progress;
+            if (typeof p === "string" && p.trim()) return p.trim();
+          }
+          if (item.status === "processing") return "Processing on server…";
+          return undefined;
+        })();
+        const queueRow: VideoQueueItem = {
           id: item.id,
           file: stubFile,
           status: queueStatus,
+          ...(driveFileId ? { driveFileId } : {}),
+          ...(stitchJobId ? { stitchJobId } : {}),
           ...(payloadShortJobId ? { shortJobId: payloadShortJobId } : {}),
-          ...(payloadShortError ? { shortError: payloadShortError } : {}),
-          ...(payloadOutputs ? { outputs: payloadOutputs } : {}),
-          ...(payloadStudioOutputs
-            ? { studioOutputs: payloadStudioOutputs }
+          ...(payloadRevision != null
+            ? { shortOutputRevision: payloadRevision }
+            : {}),
+          ...(processingJobId
+            ? { processingJobId, durableProcessing: true }
+            : canResumeDurable
+              ? { durableProcessing: true }
+              : {}),
+          ...(outputs ? { outputs } : {}),
+          ...(progressFromOutputs ? { progress: progressFromOutputs } : {}),
+          ...(outputs?.short?.status === "failed" && outputs.short.error
+            ? { shortError: outputs.short.error }
             : {}),
           ...(queueStatus === "error"
             ? {
                 error: interruptedProcessing
                   ? "Processing was interrupted. Re-upload your video or return from Stitch to continue."
-                  : (typeof payload.error === "string" && payload.error.trim()
-                      ? payload.error.trim()
-                      : undefined) ||
-                    payloadShortError ||
-                    failedOutputSummary(payloadOutputs) ||
-                    "Processing failed.",
+                  : sanitizeQueueErrorMessage(
+                      (typeof payload.error === "string" && payload.error.trim()
+                        ? payload.error.trim()
+                        : failedOutputSummary(outputs) ||
+                          "Processing failed."),
+                    ),
               }
             : {}),
-        });
+        };
+        const hydratedTranscript =
+          normalizeTranscriptSegments(payload.transcript) ?? [];
         const snap: QueueCarouselSnapshot = {
           recommendation: null,
           effectiveType:
@@ -1848,9 +1984,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                 evidenceSegmentIds: [],
               }))
             : [],
-          transcript: Array.isArray(payload.transcript)
-            ? payload.transcript
-            : [],
+          transcript: hydratedTranscript,
           durationSec:
             typeof payload.durationSec === "number"
               ? payload.durationSec
@@ -1869,7 +2003,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           backgroundFile: null,
           imagePost: imagePostFromHubPayload(
             payload,
-            Array.isArray(payload.transcript) ? payload.transcript : [],
+            hydratedTranscript,
             typeof payload.durationSec === "number" ? payload.durationSec : null,
           ),
           imagePostError: null,
@@ -1879,17 +2013,54 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           frameColorAdjust: DEFAULT_FRAME_COLOR_ADJUST,
           ...(payload.bunnyUrls ? { bunnyUrls: payload.bunnyUrls } : {}),
         };
+        if (queueRow.status === "done") {
+          queueRow.studioContentBaseline = studioContentFingerprint(
+            queueRow,
+            snap
+          );
+        }
+        newQueueRows.push(queueRow);
         newSnapshots[item.id] = snap;
         hubHydratedRef.current.add(item.id);
         hubSyncSuppressRef.current.add(item.id);
       }
 
-      // Merge into existing state — don't clobber items the user just added
-      // in this session before hydration arrived.
+      // Merge into existing state. Promote already-local stuck rows (browser
+      // fallback / open tab) onto durable re-queue when Hub has a source URL.
       setQueue((prev) => {
+        const byId = new Map(prev.map((q) => [q.id, q]));
+        for (const row of newQueueRows) {
+          const existing = byId.get(row.id);
+          if (!existing) {
+            byId.set(row.id, row);
+            continue;
+          }
+          if (
+            row.durableProcessing &&
+            !row.processingJobId &&
+            row.status === "pending" &&
+            !existing.processingJobId &&
+            existing.status !== "done"
+          ) {
+            byId.set(row.id, {
+              ...existing,
+              status: "pending",
+              durableProcessing: true,
+              processingJobId: null,
+              progress: row.progress ?? "Re-queueing on server…",
+              error: undefined,
+            });
+          } else if (!byId.has(row.id)) {
+            byId.set(row.id, row);
+          }
+        }
+        for (const row of newQueueRows) {
+          if (!byId.has(row.id)) byId.set(row.id, row);
+        }
+        // Preserve order: existing first, then newly hydrated ids.
         const existingIds = new Set(prev.map((q) => q.id));
         const merged = [
-          ...prev,
+          ...prev.map((q) => byId.get(q.id)!),
           ...newQueueRows.filter((r) => !existingIds.has(r.id)),
         ];
         queueRef.current = merged;
@@ -1898,7 +2069,22 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       setQueueResults((qr) => {
         const next = { ...qr };
         for (const [id, snap] of Object.entries(newSnapshots)) {
-          if (!next[id]) next[id] = snap;
+          // Prefer Hub bunny URLs when local snapshot is missing source.
+          const cur = next[id];
+          if (!cur) {
+            next[id] = snap;
+            continue;
+          }
+          next[id] = {
+            ...cur,
+            bunnyUrls: {
+              ...(snap.bunnyUrls ?? {}),
+              ...(cur.bunnyUrls ?? {}),
+              sourceVideoUrl:
+                cur.bunnyUrls?.sourceVideoUrl ||
+                snap.bunnyUrls?.sourceVideoUrl,
+            },
+          };
         }
         queueResultsRef.current = next;
         return next;
@@ -1919,6 +2105,13 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const flushHubSyncForItem = useCallback((id: string) => {
     const q = queueRef.current.find((row) => row.id === id);
     if (!q) return;
+    // Avoid clobbering server-worker payload while a durable job is in flight.
+    if (
+      (q.durableProcessing || q.processingJobId) &&
+      (q.status === "processing" || q.status === "pending")
+    ) {
+      return;
+    }
     const pending = hubSyncTimersRef.current.get(id);
     if (pending) {
       clearTimeout(pending);
@@ -1980,6 +2173,25 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       // self-clean inside the setTimeout callback above.
     };
   }, [queue, queueResults, flushHubSyncForItem]);
+
+  // Backfill studio baselines for done rows (e.g. finished before this field existed).
+  useEffect(() => {
+    setQueue((prev) => {
+      let changed = false;
+      const next = prev.map((q) => {
+        if (q.status !== "done" || q.studioContentBaseline) return q;
+        const snap = queueResultsRef.current[q.id];
+        if (!snap && !q.shortOutputFile && !q.shortJobId) return q;
+        changed = true;
+        return {
+          ...q,
+          studioContentBaseline: studioContentFingerprint(q, snap ?? null),
+        };
+      });
+      if (changed) queueRef.current = next;
+      return changed ? next : prev;
+    });
+  }, [queue, queueResults]);
 
   useEffect(() => {
     const flushPending = () => {
@@ -2102,17 +2314,21 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   const rehydratePreviewAssetsFromBunny = useCallback(
     async (queueItemId: string) => {
+      if (reRenderInFlightRef.current) return;
+      const epochAtStart = previewRenderEpochRef.current;
       const snap = queueResultsRef.current[queueItemId];
       if (!snapshotNeedsPreviewRehydrate(snap)) return;
       if (previewRehydrateInFlightRef.current.has(queueItemId)) return;
       previewRehydrateInFlightRef.current.add(queueItemId);
       try {
         const patch = await buildPreviewRehydratePatchFromBunny(snap!);
+        if (previewRenderEpochRef.current !== epochAtStart) return;
         if (!patch) return;
         const latest = queueResultsRef.current[queueItemId];
         if (!latest) return;
         const filtered = filterPreviewRehydratePatch(latest, patch);
         if (!filtered) return;
+        if (previewRenderEpochRef.current !== epochAtStart) return;
 
         applyPreviewRehydratePatch(queueItemId, filtered);
       } catch (e) {
@@ -2137,8 +2353,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const applySnapshot = useCallback((snap: QueueCarouselSnapshot) => {
     setRecommendation(snap.recommendation);
     setEffectiveType(snap.effectiveType);
+    editableSlidesRef.current = snap.editableSlides;
     setEditableSlides(snap.editableSlides);
-    setTranscript(snap.transcript);
+    setTranscript(normalizeTranscriptSegments(snap.transcript) ?? []);
     setDurationSec(snap.durationSec);
     setZipBase64(snap.zipBase64);
     setFirstSlidePreviewBase64(snap.firstSlidePreviewBase64);
@@ -2171,6 +2388,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   const clearWorkspaceForNewVideo = useCallback(() => {
     setRecommendation(null);
     setEffectiveType(null);
+    editableSlidesRef.current = [];
     setEditableSlides([]);
     setTranscript([]);
     setZipBase64(null);
@@ -2334,13 +2552,19 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     let changed = false;
     const next = queueRef.current.map((q) => {
       if (q.status !== "processing") return q;
-      if (q.file.size > 0) {
+      // Server-durable jobs keep polling — do not reset to pending/error.
+      if (q.durableProcessing || q.processingJobId) {
+        return q;
+      }
+      // Drive-ingest rows are resumable: servers re-pull the video by id.
+      if (q.file.size > 0 || q.driveFileId || q.stitchJobId) {
         changed = true;
         return {
           ...q,
           status: "pending" as const,
           progress: "Resuming after refresh…",
           error: undefined,
+          durableProcessing: true,
         };
       }
       changed = true;
@@ -2359,18 +2583,417 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     return changed;
   }, []);
 
+  const hubPollInFlightRef = useRef(false);
+  const durableEnqueueInFlightRef = useRef(0);
+  const DURABLE_UPLOAD_CONCURRENCY = 3;
+
+  const applyHubItemToLocalQueue = useCallback(
+    (item: HubMultiplierQueueItem) => {
+      const payload =
+        item.payload && typeof item.payload === "object"
+          ? (item.payload as MultiplierQueuePayload)
+          : ({ v: 1 } as MultiplierQueuePayload);
+      const outputs = payload.outputs;
+      const localStatus: VideoQueueItem["status"] = localQueueStatusFromHub({
+        hubStatus: item.status,
+        outputs,
+        bunnyUrls: payload.bunnyUrls,
+      });
+      const progress =
+        outputs?.carousel?.progress ||
+        outputs?.photo?.progress ||
+        outputs?.short?.progress ||
+        (localStatus === "processing" ? "Processing on server…" : undefined);
+      const shortJobId =
+        typeof payload.shortJobId === "string" && payload.shortJobId.trim()
+          ? payload.shortJobId.trim()
+          : undefined;
+      const shortError =
+        outputs?.short?.status === "failed"
+          ? outputs.short.error
+          : undefined;
+
+      setQueue((prev) => {
+        const next = prev.map((q) => {
+          if (q.id !== item.id) return q;
+          return {
+            ...q,
+            status: localStatus,
+            progress,
+              error:
+              localStatus === "error"
+                ? sanitizeQueueErrorMessage(
+                    (typeof payload.error === "string" && payload.error.trim()
+                      ? payload.error.trim()
+                      : undefined) ||
+                      failedOutputSummary(outputs) ||
+                      q.error ||
+                      "Processing failed.",
+                  )
+                : undefined,
+            outputs,
+            processingJobId:
+              typeof payload.processingJobId === "string"
+                ? payload.processingJobId
+                : q.processingJobId,
+            durableProcessing: true,
+            ...(typeof payload.driveFileId === "string" &&
+            payload.driveFileId.trim()
+              ? { driveFileId: payload.driveFileId.trim() }
+              : {}),
+            ...(typeof payload.stitchJobId === "string" &&
+            payload.stitchJobId.trim()
+              ? { stitchJobId: payload.stitchJobId.trim() }
+              : {}),
+            ...(shortJobId ? { shortJobId } : {}),
+            ...(typeof payload.shortOutputRevision === "number"
+              ? { shortOutputRevision: payload.shortOutputRevision }
+              : {}),
+            ...(shortError ? { shortError } : { shortError: undefined }),
+            ...(localStatus === "done" && !q.studioContentBaseline
+              ? {
+                  studioContentBaseline: studioContentFingerprint(
+                    {
+                      shortOutputRevision:
+                        typeof payload.shortOutputRevision === "number"
+                          ? payload.shortOutputRevision
+                          : q.shortOutputRevision,
+                    },
+                    queueResultsRef.current[q.id] ?? null,
+                  ),
+                }
+              : {}),
+          };
+        });
+        queueRef.current = next;
+        return next;
+      });
+
+      // Merge Hub snapshot fields onto local queueResults when present.
+      setQueueResults((qr) => {
+        const cur = qr[item.id];
+        const nextSnap: QueueCarouselSnapshot = {
+          recommendation: cur?.recommendation ?? null,
+          effectiveType:
+            typeof payload.effectiveType === "string"
+              ? (payload.effectiveType as QueueCarouselSnapshot["effectiveType"])
+              : (cur?.effectiveType ?? null),
+          editableSlides: Array.isArray(payload.editableSlides)
+            ? payload.editableSlides.map((s, i) => ({
+                order: i + 1,
+                headline: typeof s.headline === "string" ? s.headline : "",
+                ...(typeof s.body === "string" ? { body: s.body } : {}),
+                evidenceSegmentIds: [],
+              }))
+            : (cur?.editableSlides ?? []),
+          transcript:
+            normalizeTranscriptSegments(payload.transcript) ??
+            cur?.transcript ??
+            [],
+          durationSec:
+            typeof payload.durationSec === "number"
+              ? payload.durationSec
+              : (cur?.durationSec ?? null),
+          zipBase64: cur?.zipBase64 ?? null,
+          firstSlidePreviewBase64: cur?.firstSlidePreviewBase64 ?? null,
+          slidePreviewBase64s: cur?.slidePreviewBase64s ?? null,
+          slidePreviewBase64sInstagram:
+            cur?.slidePreviewBase64sInstagram ?? null,
+          socialCaption:
+            typeof payload.socialCaption === "string"
+              ? payload.socialCaption
+              : (cur?.socialCaption ?? ""),
+          layoutId:
+            (payload.layoutId as LayoutId | undefined) ??
+            cur?.layoutId ??
+            "stacked_center",
+          carouselOverride:
+            (payload.carouselOverride as CarouselType | "" | undefined) ??
+            cur?.carouselOverride ??
+            "",
+          backgroundSource: cur?.backgroundSource ?? "video_moments",
+          backgroundFile: cur?.backgroundFile ?? null,
+          imagePost:
+            imagePostFromHubPayload(
+              payload,
+              normalizeTranscriptSegments(payload.transcript) ??
+                cur?.transcript ??
+                [],
+              typeof payload.durationSec === "number"
+                ? payload.durationSec
+                : (cur?.durationSec ?? null),
+            ) ??
+            cur?.imagePost ??
+            null,
+          imagePostError: cur?.imagePostError ?? null,
+          socialMicro: cur?.socialMicro ?? null,
+          socialMicroError: cur?.socialMicroError ?? null,
+          processTiming: cur?.processTiming ?? null,
+          frameColorAdjust: cur?.frameColorAdjust ?? DEFAULT_FRAME_COLOR_ADJUST,
+          bunnyUrls: {
+            ...(cur?.bunnyUrls ?? {}),
+            ...(payload.bunnyUrls ?? {}),
+          },
+        };
+        const next = { ...qr, [item.id]: nextSnap };
+        queueResultsRef.current = next;
+        if (activeQueueIdRef.current === item.id && localStatus === "done") {
+          applySnapshot(nextSnap);
+          void rehydratePreviewAssetsFromBunny(item.id);
+        }
+        return next;
+      });
+    },
+    [applySnapshot, rehydratePreviewAssetsFromBunny],
+  );
+
+  const pollDurableQueueFromHub = useCallback(async () => {
+    if (hubPollInFlightRef.current) return;
+    hubPollInFlightRef.current = true;
+    try {
+      const res = await listMultiplierQueueFromHub({ limit: 100 });
+      if (!res.ok) return;
+      const localDurableIds = new Set(
+        queueRef.current
+          .filter((q) => q.durableProcessing || q.processingJobId)
+          .map((q) => q.id),
+      );
+      if (localDurableIds.size === 0) return;
+      for (const item of res.data) {
+        if (!localDurableIds.has(item.id)) continue;
+        applyHubItemToLocalQueue(item);
+      }
+    } finally {
+      hubPollInFlightRef.current = false;
+    }
+  }, [applyHubItemToLocalQueue]);
+
+  useEffect(() => {
+    const hasDurable = queue.some(
+      (q) =>
+        (q.durableProcessing || q.processingJobId) &&
+        (q.status === "processing" || q.status === "pending"),
+    );
+    if (!hasDurable) return;
+    void pollDurableQueueFromHub();
+    // Kick once on enter; rely on Coolify cron (every minute) for steady drain.
+    // Do NOT kick every few seconds — overlapping process-due handlers stampede
+    // and claim the whole queue at once (OOM / aborted leases).
+    void kickMultiplierProcessingDue();
+    const poll = window.setInterval(() => {
+      void pollDurableQueueFromHub();
+    }, 4000);
+    const kick = window.setInterval(() => {
+      void kickMultiplierProcessingDue();
+    }, 60_000);
+    return () => {
+      window.clearInterval(poll);
+      window.clearInterval(kick);
+    };
+  }, [queue, pollDurableQueueFromHub]);
+
+  const enqueueDurableJobForItem = useCallback(
+    async (item: VideoQueueItem) => {
+      const formats = withEffectiveStudioOutputs(studioOutputsRef.current);
+      const patchItem = (patch: Partial<VideoQueueItem>) => {
+        setQueue((prev) => {
+          const next = prev.map((q) =>
+            q.id === item.id ? { ...q, ...patch } : q,
+          );
+          queueRef.current = next;
+          return next;
+        });
+      };
+
+      if (item.processingJobId) {
+        patchItem({
+          status: "processing",
+          progress: "Queued on server…",
+          processingJobId: item.processingJobId,
+          durableProcessing: true,
+        });
+        void kickMultiplierProcessingDue();
+        return;
+      }
+
+      patchItem({
+        status: "processing",
+        progress:
+          item.driveFileId || item.stitchJobId
+            ? "Queueing server job…"
+            : "Uploading source for background processing…",
+        durableProcessing: true,
+        error: undefined,
+      });
+
+      let sourceVideoUrl: string | undefined;
+      try {
+        const existingUrl = storedSourceVideoUrl(
+          item.id,
+          queueResultsRef.current,
+        );
+        if (existingUrl) {
+          sourceVideoUrl = existingUrl;
+        } else if (item.driveFileId || item.stitchJobId) {
+          // Server will pull from Drive / wait for stitch — no browser upload.
+        } else {
+          if (!item.file || item.file.size === 0) {
+            throw new Error("Missing video file for upload.");
+          }
+          const url = await uploadFileToBunnyStorage(item.file, {
+            filename: item.file.name || `${item.id}.mp4`,
+            contentType: item.file.type || "video/mp4",
+          });
+          if (!url) {
+            throw new Error(
+              "Could not upload source video to storage for background processing.",
+            );
+          }
+          sourceVideoUrl = url;
+          setQueueResults((qr) => {
+            const cur = qr[item.id];
+            const base: QueueCarouselSnapshot =
+              cur ??
+              ({
+                recommendation: null,
+                effectiveType: null,
+                editableSlides: [],
+                transcript: [],
+                durationSec: null,
+                zipBase64: null,
+                firstSlidePreviewBase64: null,
+                slidePreviewBase64s: null,
+                socialCaption: "",
+                layoutId: PROCESS_DEFAULTS.layoutId,
+                carouselOverride: PROCESS_DEFAULTS.carouselOverride,
+                backgroundSource: PROCESS_DEFAULTS.backgroundSource,
+                backgroundFile: null,
+                imagePost: null,
+                imagePostError: null,
+                socialMicro: null,
+                socialMicroError: null,
+                processTiming: null,
+                frameColorAdjust: PROCESS_DEFAULTS.frameColorAdjust,
+              } as QueueCarouselSnapshot);
+            const next = {
+              ...qr,
+              [item.id]: {
+                ...base,
+                bunnyUrls: {
+                  ...(base.bunnyUrls ?? {}),
+                  sourceVideoUrl: url,
+                },
+              },
+            };
+            queueResultsRef.current = next;
+            return next;
+          });
+        }
+
+        patchItem({
+          progress: existingUrl
+            ? "Re-queueing existing source on server…"
+            : item.driveFileId || item.stitchJobId
+              ? "Queueing server job…"
+              : "Starting background job…",
+        });
+        const created = await createMultiplierProcessingJob({
+          queueItemId: item.id,
+          videoLabel: item.displayLabel?.trim() || item.file.name,
+          ...(sourceVideoUrl ? { sourceVideoUrl } : {}),
+          ...(item.driveFileId ? { driveFileId: item.driveFileId } : {}),
+          ...(item.stitchJobId ? { stitchJobId: item.stitchJobId } : {}),
+          ...(item.aiInstructions
+            ? { aiInstructions: item.aiInstructions }
+            : {}),
+          outputsWanted: {
+            carousel: formats.carousel,
+            photo: formats.imagePost,
+            short: formats.reelShort,
+            ...(formats.xPost ? { xPost: true } : {}),
+          },
+          studioSettings: {
+            layoutId: PROCESS_DEFAULTS.layoutId,
+            carouselOverride: PROCESS_DEFAULTS.carouselOverride || undefined,
+            frameColorAdjust: PROCESS_DEFAULTS.frameColorAdjust,
+          },
+        });
+        if (!created.ok) {
+          throw new Error(created.message);
+        }
+        patchItem({
+          status: "processing",
+          progress: "Queued on server…",
+          processingJobId: created.jobId,
+          durableProcessing: true,
+        });
+        void kickMultiplierProcessingDue();
+      } catch (e) {
+        console.warn("[multiplier] durable enqueue failed:", e);
+        patchItem({
+          status: "error",
+          progress: undefined,
+          durableProcessing: false,
+          processingJobId: null,
+          error: sanitizeQueueErrorMessage(
+            e instanceof Error
+              ? e.message
+              : "Could not start background job. Refresh to retry.",
+          ),
+        });
+      }
+    },
+    [],
+  );
+
+  const drainDurableEnqueue = useCallback(() => {
+    while (durableEnqueueInFlightRef.current < DURABLE_UPLOAD_CONCURRENCY) {
+      const next = queueRef.current.find((q) => {
+        if (
+          q.status !== "pending" ||
+          q.durableProcessing !== true ||
+          q.processingJobId
+        ) {
+          return false;
+        }
+        if (q.file.size > 0 || Boolean(q.driveFileId) || Boolean(q.stitchJobId))
+          return true;
+        return Boolean(storedSourceVideoUrl(q.id, queueResultsRef.current));
+      });
+      if (!next) break;
+      // Claim immediately (sync on queueRef) so the while-loop can't re-pick.
+      durableEnqueueInFlightRef.current += 1;
+      const claimed: VideoQueueItem = {
+        ...next,
+        status: "processing",
+        progress: "Preparing background job…",
+      };
+      queueRef.current = queueRef.current.map((q) =>
+        q.id === next.id ? claimed : q,
+      );
+      setQueue(queueRef.current);
+      void enqueueDurableJobForItem(claimed).finally(() => {
+        durableEnqueueInFlightRef.current -= 1;
+        drainDurableEnqueue();
+      });
+    }
+  }, [enqueueDurableJobForItem]);
+
   const processQueueLoop = useCallback(async () => {
     if (processingQueueRef.current) return;
     processingQueueRef.current = true;
     try {
       recoverStaleProcessingRows();
       for (;;) {
-        const pending = queueRef.current.find((q) => q.status === "pending");
+        const pending = queueRef.current.find(
+          (q) =>
+            q.status === "pending" &&
+            !q.durableProcessing &&
+            !q.processingJobId,
+        );
         if (!pending) break;
 
-        const formats = withEffectiveStudioOutputs(
-          pending.studioOutputs ?? studioOutputsRef.current
-        );
+        const formats = withEffectiveStudioOutputs(studioOutputsRef.current);
         const needsTranscript =
           formats.carousel || formats.imagePost || formats.xPost;
         const mobileSequential = isMobileClient();
@@ -2465,6 +3088,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           const passthroughShort = {
             outputFile: pending.file,
             jobId: null,
+            outputRevision: 0,
             editorialSummary: null,
             editorialSkip: null,
             editorialCuts: null,
@@ -2476,14 +3100,43 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           let snapBase: QueueCarouselSnapshot;
           let shortError: string | undefined;
 
+          // Drive items: create the from-drive Short job FIRST. The create
+          // returns within seconds (the backend downloads from Drive in the
+          // background) and its jobId doubles as `sourceJobId`, letting
+          // transcribe/carousel/image post reuse the job's downloaded source
+          // instead of pulling the file from Drive three more times.
+          let driveSourceJobId: string | undefined;
+          let driveShortDisabled = false;
+          let driveCreateError: string | undefined;
+          if (pending.driveFileId && formats.reelShort) {
+            setItemProgress("Starting server-side Drive ingest…");
+            try {
+              const created = await createShortJobFromDrive(
+                pending.driveFileId,
+                pending.file,
+                shortTextOpts,
+                { signal }
+              );
+              if (created) driveSourceJobId = created.jobId;
+              else driveShortDisabled = true;
+            } catch (e) {
+              if (signal.aborted) throw e;
+              driveCreateError =
+                e instanceof Error
+                  ? e.message
+                  : "Video to Short create failed.";
+            }
+            assertQueueItemActive();
+          }
+
           if (mobileSequential) {
             let sharedTranscript: QueueCarouselSnapshot["transcript"] = [];
             if (needsTranscript) {
               setItemProgress("Transcribing audio…");
-              sharedTranscript = await postVideoTranscript(
-                pending.file,
-                signal
-              );
+              sharedTranscript = await postVideoTranscript(pending.file, signal, {
+                driveFileId: pending.driveFileId,
+                sourceJobId: driveSourceJobId,
+              });
               assertQueueItemActive();
             }
 
@@ -2507,6 +3160,8 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                       onProgress: setItemProgress,
                       signal,
                       serializeUploads: true,
+                      driveFileId: pending.driveFileId,
+                      sourceJobId: driveSourceJobId,
                     },
                     backgroundInputRef
                   )
@@ -2523,12 +3178,27 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             if (formats.reelShort) {
               try {
                 setItemProgress("Video to Short…");
-                shortResult = await runVideoToShortIfEnabled(
-                  pending.file,
-                  setItemProgress,
-                  shortTextOpts,
-                  { signal }
-                );
+                if (pending.driveFileId) {
+                  if (driveSourceJobId) {
+                    shortResult = await resumeShortJobOutput(
+                      driveSourceJobId,
+                      pending.file,
+                      setItemProgress,
+                      { signal }
+                    );
+                  } else if (!driveShortDisabled) {
+                    throw new Error(
+                      driveCreateError ?? "Video to Short create failed."
+                    );
+                  }
+                } else {
+                  shortResult = await runVideoToShortIfEnabled(
+                    pending.file,
+                    setItemProgress,
+                    shortTextOpts,
+                    { signal }
+                  );
+                }
                 if (!shortResult.jobId) {
                   shortError =
                     "Reel was skipped (Video to Short is off or unreachable). Carousel and image post used your original upload.";
@@ -2539,6 +3209,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                   shortResult = {
                     outputFile: pending.file,
                     jobId: inflight.jobId,
+                    outputRevision: 0,
                     editorialSummary: null,
                     editorialSkip: null,
                     editorialCuts: null,
@@ -2555,21 +3226,44 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
               assertQueueItemActive();
             }
           } else {
+            // Drive create failed outright (not "disabled"): fail the item
+            // now instead of leaking an already-rejected promise into the
+            // parallel block (which would log an unhandled rejection).
+            if (
+              pending.driveFileId &&
+              formats.reelShort &&
+              !driveSourceJobId &&
+              !driveShortDisabled
+            ) {
+              throw new Error(
+                driveCreateError ?? "Video to Short create failed."
+              );
+            }
+
             const shortP = formats.reelShort
-              ? runVideoToShortIfEnabled(
-                  pending.file,
-                  setItemProgress,
-                  shortTextOpts,
-                  { signal }
-                )
+              ? pending.driveFileId
+                ? driveSourceJobId
+                  ? resumeShortJobOutput(
+                      driveSourceJobId,
+                      pending.file,
+                      setItemProgress,
+                      { signal }
+                    )
+                  : Promise.resolve(passthroughShort)
+                : runVideoToShortIfEnabled(
+                    pending.file,
+                    setItemProgress,
+                    shortTextOpts,
+                    { signal }
+                  )
               : Promise.resolve(passthroughShort);
 
             let sharedTranscript: QueueCarouselSnapshot["transcript"] = [];
             if (needsTranscript) {
-              sharedTranscript = await postVideoTranscript(
-                pending.file,
-                signal
-              );
+              sharedTranscript = await postVideoTranscript(pending.file, signal, {
+                driveFileId: pending.driveFileId,
+                sourceJobId: driveSourceJobId,
+              });
               assertQueueItemActive();
             }
 
@@ -2615,6 +3309,8 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                       },
                       onProgress: setItemProgress,
                       signal,
+                      driveFileId: pending.driveFileId,
+                      sourceJobId: driveSourceJobId,
                     },
                     backgroundInputRef
                   )
@@ -2668,21 +3364,65 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           const wasDone =
             queueRef.current.find((q) => q.id === pending.id)?.status === "done";
           if (!wasDone) incrementVideosMultiplied();
+          const doneOutputs: MultiplierOutputsState = {
+            carousel: formats.carousel
+              ? {
+                  status: "done",
+                  readyToSchedule: false,
+                }
+              : { status: "skipped", readyToSchedule: false },
+            photo: formats.imagePost
+              ? {
+                  status: snapBase.imagePost ? "done" : "failed",
+                  readyToSchedule: false,
+                  ...(snapBase.imagePostError
+                    ? { error: snapBase.imagePostError }
+                    : {}),
+              }
+              : { status: "skipped", readyToSchedule: false },
+            short: formats.reelShort
+              ? shortErrorStored && !shortJobIdStored && !shortOutputFileStored
+                ? {
+                    status: "failed",
+                    readyToSchedule: false,
+                    error: shortErrorStored,
+                  }
+                : {
+                    status: "done",
+                    readyToSchedule: false,
+                    ...(shortErrorStored ? { error: shortErrorStored } : {}),
+                  }
+              : { status: "skipped", readyToSchedule: false },
+          };
+          const doneQueuePatch = {
+            status: "done" as const,
+            progress: undefined,
+            shortOutputFile: shortOutputFileStored,
+            shortJobId: shortJobIdStored,
+            shortOutputRevision: shortResult.outputRevision,
+            shortEditorialSummary,
+            shortEditorialSkip,
+            shortEditorialCuts,
+            durableProcessing: false,
+            outputs: doneOutputs,
+            ...(shortErrorStored
+              ? { shortError: shortErrorStored }
+              : { shortError: undefined }),
+            ...(!wasDone
+              ? {
+                  studioContentBaseline: studioContentFingerprint(
+                    { shortOutputRevision: shortResult.outputRevision },
+                    snap
+                  ),
+                }
+              : {}),
+          };
           setQueue((prev) =>
             prev.map((q) =>
               q.id === pending.id
                 ? {
                     ...q,
-                    status: "done" as const,
-                    progress: undefined,
-                    shortOutputFile: shortOutputFileStored,
-                    shortJobId: shortJobIdStored,
-                    shortEditorialSummary,
-                    shortEditorialSkip,
-                    shortEditorialCuts,
-                    ...(shortErrorStored
-                      ? { shortError: shortErrorStored }
-                      : { shortError: undefined }),
+                    ...doneQueuePatch,
                   }
                 : q
             )
@@ -2691,16 +3431,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             q.id === pending.id
               ? {
                   ...q,
-                  status: "done" as const,
-                  progress: undefined,
-                  shortOutputFile: shortOutputFileStored,
-                  shortJobId: shortJobIdStored,
-                  shortEditorialSummary,
-                  shortEditorialSkip,
-                  shortEditorialCuts,
-                  ...(shortErrorStored
-                    ? { shortError: shortErrorStored }
-                    : { shortError: undefined }),
+                  ...doneQueuePatch,
                 }
               : q
           );
@@ -2782,20 +3513,52 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   }, [applySnapshot, recoverStaleProcessingRows]);
 
   useEffect(() => {
+    processQueueLoopRef.current = () => {
+      void processQueueLoop();
+    };
+  }, [processQueueLoop]);
+
+  useEffect(() => {
     recoverStaleProcessingRows();
-    if (queueRef.current.some((q) => q.status === "pending")) {
+    if (
+      queueRef.current.some(
+        (q) =>
+          q.status === "pending" &&
+          !q.durableProcessing &&
+          !q.processingJobId,
+      )
+    ) {
       void processQueueLoop();
     }
   }, [processQueueLoop, recoverStaleProcessingRows]);
+
+  // Hydration / new uploads can add durable-pending rows after mount — drain
+  // whenever the queue gains them (do not run recoverStale here; that would
+  // bounce in-flight browser jobs back to Waiting on every setQueue).
+  useEffect(() => {
+    if (
+      queue.some(
+        (q) =>
+          q.status === "pending" &&
+          q.durableProcessing === true &&
+          !q.processingJobId,
+      )
+    ) {
+      drainDurableEnqueue();
+    }
+  }, [queue, drainDurableEnqueue]);
 
   const enqueueFiles = useCallback(
     (
       files: File[],
       opts?: {
         aiInstructionsByIndex?: Array<string | undefined>;
-        studioOutputs?: StudioOutputToggles;
+        /** Drive inbox ids for server-side ingest (parallel to `files`). */
+        driveFileIdsByIndex?: Array<string | undefined>;
+        /** Stitch job ids for server-side ingest (parallel to `files`). */
+        stitchJobIdsByIndex?: Array<string | undefined>;
       }
-    ): string[] => {
+    ) => {
       const list = files.filter(isLikelyVideoFile);
       if (list.length === 0) {
         if (files.length > 0) {
@@ -2803,46 +3566,102 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             "None of the selected files look like supported videos (e.g. .mp4, .mov, .webm). If this is a video, try renaming with a standard extension or export as MP4."
           );
         }
-        return [];
+        return;
       }
-      const o = withEffectiveStudioOutputs(
-        opts?.studioOutputs ?? studioOutputsRef.current
-      );
+      const o = withEffectiveStudioOutputs(studioOutputsRef.current);
       if (!o.carousel && !o.imagePost && !o.xPost && !o.reelShort) {
         setError("Choose at least one output format before uploading.");
-        return [];
+        return;
       }
       setError(null);
       const notesByIndex = opts?.aiInstructionsByIndex ?? [];
-      const itemOutputs = opts?.studioOutputs;
-      const newItems: VideoQueueItem[] = list.map((f, idx) => ({
+      const driveIdsByIndex = opts?.driveFileIdsByIndex ?? [];
+      const stitchIdsByIndex = opts?.stitchJobIdsByIndex ?? [];
+      const takenNames = new Set(
+        queueRef.current.map((q) => q.file.name.trim().toLowerCase()),
+      );
+      const uniqueList: File[] = [];
+      const uniqueNotes: Array<string | undefined> = [];
+      const uniqueDriveIds: Array<string | undefined> = [];
+      const uniqueStitchIds: Array<string | undefined> = [];
+      list.forEach((f, idx) => {
+        const n = f.name.trim().toLowerCase();
+        if (!n || takenNames.has(n)) return;
+        takenNames.add(n);
+        uniqueList.push(f);
+        uniqueNotes.push(notesByIndex[idx]);
+        uniqueDriveIds.push(driveIdsByIndex[idx]);
+        uniqueStitchIds.push(stitchIdsByIndex[idx]);
+      });
+      if (uniqueList.length === 0) return;
+      const newItems: VideoQueueItem[] = uniqueList.map((f, idx) => ({
         id: crypto.randomUUID(),
         file: f,
-        aiInstructions:
-          typeof notesByIndex[idx] === "string"
-            ? notesByIndex[idx]!.trim().slice(0, MAX_CAROUSEL_FOCUS_CHARS)
+        driveFileId:
+          typeof uniqueDriveIds[idx] === "string" &&
+          uniqueDriveIds[idx]!.trim().length > 0
+            ? uniqueDriveIds[idx]!.trim()
             : undefined,
-        ...(itemOutputs ? { studioOutputs: itemOutputs } : {}),
+        stitchJobId:
+          typeof uniqueStitchIds[idx] === "string" &&
+          uniqueStitchIds[idx]!.trim().length > 0
+            ? uniqueStitchIds[idx]!.trim()
+            : undefined,
+        aiInstructions:
+          typeof uniqueNotes[idx] === "string"
+            ? uniqueNotes[idx]!.trim().slice(0, MAX_CAROUSEL_FOCUS_CHARS)
+            : undefined,
         status: "pending" as const,
+        // Prefer durable server jobs so tab close does not kill the batch.
+        durableProcessing: true,
       }));
-      // Update ref synchronously before processQueueLoop  -  React may apply
-      // setQueue after the file input handler returns, so the loop would see an empty queue.
+      // Update ref synchronously before drain — React may apply setQueue later.
       const next = [...queueRef.current, ...newItems];
       queueRef.current = next;
       setQueue(next);
       // Always focus the new upload so the UI does not stay on a previous queue item
       // (prev ?? newId kept the old selection and felt like "nothing happened").
       selectQueueItem(newItems[0]!.id);
-      void processQueueLoop();
-      return newItems.map((item) => item.id);
+      // Do not set global `loading` — keep Add unlocked while server jobs run.
+      drainDurableEnqueue();
     },
-    [processQueueLoop, selectQueueItem, setError]
+    [drainDurableEnqueue, selectQueueItem, setError]
   );
 
   const file = useMemo(() => {
     if (!activeQueueId) return null;
     return queue.find((q) => q.id === activeQueueId)?.file ?? null;
   }, [queue, activeQueueId]);
+
+  const canReRenderZip = useMemo(() => {
+    if (!activeQueueId || editableSlides.length === 0 || transcript.length === 0) {
+      return false;
+    }
+    const activeRow = queue.find((q) => q.id === activeQueueId);
+    const sourceVideoUrl = storedSourceVideoUrl(activeQueueId, queueResults);
+    return hasCarouselVideoSource({
+      videoFile: activeRow?.file ?? null,
+      driveFileId: activeRow?.driveFileId,
+      sourceVideoUrl,
+    });
+  }, [activeQueueId, editableSlides.length, queue, queueResults, transcript.length]);
+
+  const canRegenerateImagePostCopy = useMemo(() => {
+    if (!activeQueueId || transcript.length === 0) return false;
+    const activeRow = queue.find((q) => q.id === activeQueueId);
+    const sourceVideoUrl = storedSourceVideoUrl(activeQueueId, queueResults);
+    return hasCarouselVideoSource({
+      videoFile: activeRow?.file ?? null,
+      driveFileId: activeRow?.driveFileId,
+      sourceVideoUrl,
+    });
+  }, [activeQueueId, queue, queueResults, transcript.length]);
+
+  const canRerenderImagePostOverlay = useMemo(() => {
+    if (!canRegenerateImagePostCopy || !imagePost) return false;
+    const frameTime = imagePost.frameTimeSec;
+    return frameTime !== undefined && Number.isFinite(frameTime);
+  }, [canRegenerateImagePostCopy, imagePost]);
 
   const shortOutputFile = useMemo(() => {
     if (!activeQueueId) return null;
@@ -2882,6 +3701,14 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
   }, [queue, activeQueueId]);
 
+  const shortOutputRevision = useMemo(() => {
+    if (!activeQueueId) return 0;
+    const rev = queue.find((q) => q.id === activeQueueId)?.shortOutputRevision;
+    return typeof rev === "number" && Number.isFinite(rev) && rev >= 0
+      ? Math.floor(rev)
+      : 0;
+  }, [queue, activeQueueId]);
+
   const reelMp4Url = useMemo(() => {
     if (!activeQueueId) return null;
     const url = queueResults[activeQueueId]?.bunnyUrls?.reelMp4Url;
@@ -2896,6 +3723,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         editorialSummary?: string | null;
         editorialSkip?: string | null;
         editorialCuts?: unknown | null;
+        outputRevision?: number;
       }
     ) => {
       const patch = (q: VideoQueueItem): VideoQueueItem =>
@@ -2914,6 +3742,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
               ...(extras?.editorialCuts !== undefined
                 ? { shortEditorialCuts: extras.editorialCuts }
                 : {}),
+              ...(extras?.outputRevision !== undefined
+                ? { shortOutputRevision: extras.outputRevision }
+                : {}),
             }
           : q;
       setQueue((prev) => {
@@ -2926,6 +3757,22 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     },
     []
   );
+
+  const clearStoredReelMp4Url = useCallback((queueId: string) => {
+    setQueueResults((qr) => {
+      const cur = qr[queueId];
+      if (!cur?.bunnyUrls?.reelMp4Url) return qr;
+      const { reelMp4Url: _removed, ...restBunny } = cur.bunnyUrls;
+      const bunnyUrls =
+        Object.keys(restBunny).length > 0 ? restBunny : undefined;
+      const next = {
+        ...qr,
+        [queueId]: { ...cur, bunnyUrls },
+      };
+      queueResultsRef.current = next;
+      return next;
+    });
+  }, []);
 
   const resumeShortForQueueItem = useCallback(
     async (queueId: string) => {
@@ -2965,7 +3812,14 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       try {
         const snap = queueResultsRef.current[queueId];
         const reelUrl = snap?.bunnyUrls?.reelMp4Url?.trim();
-        if (reelUrl) {
+
+        // While reprocessing this session, prefer the Short backend (freshest).
+        // Otherwise prefer Bunny — job download URLs expire after days/redeploys.
+        const preferBackend = Boolean(
+          row.shortOutputRevision && row.shortOutputRevision > 0 && !reelUrl
+        );
+
+        if (!preferBackend && reelUrl) {
           const res = await fetch(reelUrl, { cache: "no-store" });
           if (res.ok) {
             const bytes = await res.arrayBuffer();
@@ -2982,12 +3836,33 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
         try {
           const file = await downloadCompletedShortFile(jobId, outputName);
-          applyShortToQueueItem(queueId, file);
+          const state = await fetchJobPollState(jobId);
+          applyShortToQueueItem(queueId, file, {
+            outputRevision: pickOutputRevisionFromJobPoll(
+              state as Record<string, unknown>
+            ),
+            ...editorialFieldsFromJobPoll(state),
+          });
           clearInFlightShortJob();
           return;
         } catch (e) {
           const msg = e instanceof Error ? e.message : "";
-          if (!msg.includes("still")) throw e;
+          // Fall through to Bunny / poll when backend is gone or still encoding.
+          if (reelUrl) {
+            const res = await fetch(reelUrl, { cache: "no-store" });
+            if (res.ok) {
+              const bytes = await res.arrayBuffer();
+              if (bytes.byteLength > 0) {
+                applyShortToQueueItem(
+                  queueId,
+                  new File([bytes], outputName, { type: "video/mp4" })
+                );
+                clearInFlightShortJob();
+                return;
+              }
+            }
+          }
+          if (!msg.toLowerCase().includes("still")) throw e;
         }
 
         const { file, finalState } = await pollVideoToShortJobUntilFile(
@@ -2995,11 +3870,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           outputName,
           onProgress
         );
-        applyShortToQueueItem(
-          queueId,
-          file,
-          editorialFieldsFromJobPoll(finalState)
-        );
+        applyShortToQueueItem(queueId, file, {
+          outputRevision: pickOutputRevisionFromJobPoll(
+            finalState as Record<string, unknown>
+          ),
+          ...editorialFieldsFromJobPoll(finalState),
+        });
         clearInFlightShortJob();
       } catch (e) {
         const msg =
@@ -3106,7 +3982,11 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     }
 
     for (const q of queue) {
-      if (!shouldAutoResumeShort(q, shortResumeGiveUpRef.current)) continue;
+      const hasBunnyReel = Boolean(
+        queueResults[q.id]?.bunnyUrls?.reelMp4Url?.trim(),
+      );
+      if (!shouldAutoResumeShort(q, shortResumeGiveUpRef.current, hasBunnyReel))
+        continue;
       void resumeShortForQueueItem(q.id);
     }
   }, [queue, queueResults, resumeShortForQueueItem]);
@@ -3134,7 +4014,6 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       return;
     }
 
-    shortEditorialHydratedRef.current.add(jobId);
     let cancelled = false;
     (async () => {
       try {
@@ -3150,6 +4029,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
           Boolean(fields.editorialSkip) ||
           (fields.editorialCuts !== undefined && fields.editorialCuts !== null);
         if (hasAny) {
+          shortEditorialHydratedRef.current.add(jobId);
           setQueue((prev) =>
             prev.map((q) =>
               q.id === aid
@@ -3188,28 +4068,45 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       const aid = activeQueueIdRef.current;
       if (!aid) {
         setError("No active video.");
-        return;
+        return false;
       }
       if (shortReprocessInFlightRef.current) {
-        return;
+        setError("A re-process is already running for this reel.");
+        return false;
       }
       const row = queueRef.current.find((q) => q.id === aid);
       if (!row?.shortJobId) {
         setError(
           "Short re-process needs a job from this session. Re-upload the video to enable editing."
         );
-        return;
+        return false;
+      }
+      if (shortJobPollLockRef.current.has(row.shortJobId)) {
+        setError("Short job is busy — wait for the current operation to finish.");
+        return false;
       }
       shortReprocessInFlightRef.current = true;
+      shortJobPollLockRef.current.add(row.shortJobId);
       setShortReprocessBusy(true);
+      setShortReprocessProgress(null);
       setError(null);
+      setQueue((prev) =>
+        prev.map((q) =>
+          q.id === aid ? { ...q, shortOutputFile: undefined } : q
+        )
+      );
+      queueRef.current = queueRef.current.map((q) =>
+        q.id === aid ? { ...q, shortOutputFile: undefined } : q
+      );
       try {
         const shortRun = await reprocessVideoToShortJob(
           row.shortJobId,
           text,
-          getShortOutputFileName(row.file.name)
+          getShortOutputFileName(row.file.name),
+          (message) => setShortReprocessProgress(message)
         );
         shortEditorialHydratedRef.current.add(row.shortJobId);
+        clearStoredReelMp4Url(aid);
         setQueue((prev) =>
           prev.map((q) =>
             q.id === aid
@@ -3217,6 +4114,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                   ...q,
                   shortOutputFile: shortRun.outputFile,
                   shortError: undefined,
+                  shortOutputRevision: shortRun.outputRevision,
                   shortEditorialSummary: shortRun.editorialSummary ?? null,
                   shortEditorialSkip: shortRun.editorialSkip ?? null,
                   shortEditorialCuts: shortRun.editorialCuts ?? null,
@@ -3230,22 +4128,28 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                 ...q,
                 shortOutputFile: shortRun.outputFile,
                 shortError: undefined,
+                shortOutputRevision: shortRun.outputRevision,
                 shortEditorialSummary: shortRun.editorialSummary ?? null,
                 shortEditorialSkip: shortRun.editorialSkip ?? null,
                 shortEditorialCuts: shortRun.editorialCuts ?? null,
               }
             : q
         );
+        return true;
       } catch (e) {
         setError(
           e instanceof Error ? e.message : "Short re-process failed."
         );
+        return false;
       } finally {
         shortReprocessInFlightRef.current = false;
+        const jid = queueRef.current.find((q) => q.id === aid)?.shortJobId;
+        if (jid) shortJobPollLockRef.current.delete(jid);
         setShortReprocessBusy(false);
+        setShortReprocessProgress(null);
       }
     },
-    []
+    [clearStoredReelMp4Url]
   );
 
   const generateCarousel = useCallback(
@@ -3263,11 +4167,28 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       setSocialMicroError(null);
 
       const aid = activeQueueIdRef.current;
-      const videoFile =
-        (aid ? queueRef.current.find((q) => q.id === aid)?.file : null) ??
-        null;
-      if (!videoFile || !aid) {
-        setError("Choose a video file.");
+      const activeRow = aid
+        ? queueRef.current.find((q) => q.id === aid)
+        : undefined;
+      const videoFile = activeRow?.file ?? null;
+      const rerunDriveFileId = activeRow?.driveFileId;
+      const sourceVideoUrl = storedSourceVideoUrl(
+        aid,
+        queueResultsRef.current
+      );
+      if (
+        !aid ||
+        !hasCarouselVideoSource({
+          videoFile,
+          driveFileId: rerunDriveFileId,
+          sourceVideoUrl,
+        })
+      ) {
+        setError(
+          videoFile && videoFile.size === 0 && !sourceVideoUrl && !rerunDriveFileId
+            ? "Source video isn't available on this device (was processed on another session). Re-upload the original video to regenerate."
+            : "Choose a video file."
+        );
         return;
       }
 
@@ -3300,10 +4221,11 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       setLoading(true);
       setProcessTiming(null);
       try {
+        const normalizedTranscript = normalizeTranscriptSegments(transcript);
         const canReuseTranscript =
-          !defaultsOnly && transcript.length > 0;
+          !defaultsOnly && normalizedTranscript !== null;
         const snap = await postCarouselAndImagePost(
-          videoFile,
+          videoFile ?? activeRow!.file,
           {
             layoutId: layout,
             carouselOverride: carousel,
@@ -3314,7 +4236,11 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
                 : null,
             frameColorAdjust,
             reuseTranscription: canReuseTranscript,
-            existingTranscript: canReuseTranscript ? transcript : undefined,
+            existingTranscript: normalizedTranscript ?? undefined,
+            driveFileId: rerunDriveFileId,
+            sourceJobId:
+              (rerunDriveFileId ? activeRow?.shortJobId : null) ?? undefined,
+            sourceVideoUrl,
             outputs: {
               carousel: out.carousel,
               imagePost: out.imagePost,
@@ -3355,6 +4281,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         if (field === "headline") row.headline = value;
         else row.body = value;
         next[index] = row;
+        editableSlidesRef.current = next;
         return next;
       });
     },
@@ -3367,6 +4294,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       const next = prev
         .filter((_, i) => i !== index)
         .map((s, i) => ({ ...s, order: i + 1 }));
+      editableSlidesRef.current = next;
       carouselTextBaselineForLearningRef.current =
         cloneSlidesForLearningBaseline(next);
       return next;
@@ -3396,6 +4324,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         evidenceSegmentIds: [],
       };
       const next = [...prev, row];
+      editableSlidesRef.current = next;
       carouselTextBaselineForLearningRef.current =
         cloneSlidesForLearningBaseline(next);
       return next;
@@ -3417,6 +4346,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         ...s,
         order: i + 1,
       }));
+      editableSlidesRef.current = next;
       carouselTextBaselineForLearningRef.current =
         cloneSlidesForLearningBaseline(next);
       return next;
@@ -3433,27 +4363,52 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     });
   }, []);
 
-  const reRenderInFlightRef = useRef(false);
-
   const reRenderZip = useCallback(async () => {
     if (reRenderInFlightRef.current) return;
+    const failReRender = (message: string) => {
+      setError(message);
+      setReRenderError(message);
+    };
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLTextAreaElement ||
+      active instanceof HTMLInputElement
+    ) {
+      active.blur();
+    }
+    // Finish any in-flight controlled-input updates before reading slide copy.
+    await new Promise<void>((resolve) => queueMicrotask(() => resolve()));
     setError(null);
+    setReRenderError(null);
     const aid = activeQueueIdRef.current;
-    const videoFile =
-      (aid ? queueRef.current.find((q) => q.id === aid)?.file : null) ?? null;
+    const activeRow = aid
+      ? queueRef.current.find((q) => q.id === aid)
+      : undefined;
+    const videoFile = activeRow?.file ?? null;
+    const driveFileId = activeRow?.driveFileId;
+    const driveSourceJobId =
+      (driveFileId ? activeRow?.shortJobId : null) ?? undefined;
     const slidesForRender = editableSlidesRef.current;
-    const sourceVideoUrl =
-      aid && queueResultsRef.current[aid]?.bunnyUrls?.sourceVideoUrl?.trim();
+    const transcriptForRender = transcriptRef.current;
+    const sourceVideoUrl = storedSourceVideoUrl(
+      aid,
+      queueResultsRef.current
+    );
     const useServerSourceVideo =
       Boolean(sourceVideoUrl) && (!videoFile || videoFile.size === 0);
     if (
       slidesForRender.length === 0 ||
-      (!useServerSourceVideo && (!videoFile || videoFile.size === 0))
+      transcriptForRender.length === 0 ||
+      (!useServerSourceVideo &&
+        !driveFileId &&
+        (!videoFile || videoFile.size === 0))
     ) {
-      setError(
-        videoFile && videoFile.size === 0 && !sourceVideoUrl
-          ? "Source video isn't available on this device (was processed on another session). Re-upload the original video to re-render."
-          : "Need a video file and slides to re-render.",
+      failReRender(
+        transcriptForRender.length === 0
+          ? "Need transcript to re-render slides."
+          : videoFile && videoFile.size === 0 && !sourceVideoUrl && !driveFileId
+            ? "Source video isn't available on this device (was processed on another session). Re-upload the original video to re-render."
+            : "Need a video file and slides to re-render.",
       );
       return;
     }
@@ -3477,16 +4432,16 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     const renderTimeout = setTimeout(() => abortController.abort(), renderTimeoutMs);
     try {
       const fd = new FormData();
-      if (useServerSourceVideo && sourceVideoUrl) {
-        fd.append("sourceVideoUrl", sourceVideoUrl);
-      } else if (videoFile) {
-        fd.append("video", videoFile);
-      }
+      appendCarouselVideoIngestFields(fd, videoFile ?? new File([], "video.mp4"), {
+        driveFileId,
+        sourceJobId: driveSourceJobId,
+        sourceVideoUrl: useServerSourceVideo ? sourceVideoUrl : undefined,
+      });
       if (backgroundSource === "own_background" && bgFile) {
         fd.append("background", bgFile);
       }
       fd.append("slides", JSON.stringify(slidesForRender));
-      fd.append("transcript", JSON.stringify(transcript));
+      fd.append("transcript", JSON.stringify(transcriptForRender));
       fd.append("layoutId", layoutId);
       fd.append("brandingId", DEFAULT_BRANDING_ID);
       appendVisualReferenceFormFields(fd);
@@ -3504,7 +4459,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       try {
         data = text.trim() ? (JSON.parse(text) as Record<string, unknown>) : {};
       } catch {
-        setError(
+        failReRender(
           res.ok
             ? "Invalid response from server."
             : `Re-render failed (${res.status}).`
@@ -3512,11 +4467,19 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         return;
       }
       if (!res.ok) {
-        setError(
+        failReRender(
           typeof data.error === "string" ? data.error : "Re-render failed"
         );
         return;
       }
+      if (
+        typeof data.zipBase64 !== "string" ||
+        data.zipBase64.trim().length === 0
+      ) {
+        failReRender("Re-render finished but no slide images were returned.");
+        return;
+      }
+      previewRenderEpochRef.current += 1;
       const learnLines = buildCarouselLearningLines(
         carouselTextBaselineForLearningRef.current,
         slidesForRender
@@ -3557,6 +4520,8 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       if (aid) {
         setQueueResults((qr) => {
           const prevSnap = qr[aid] ?? buildSnapshotFromWorkspace();
+          const prevBunny = prevSnap.bunnyUrls;
+          const nextSlidesAssetVersion = (prevSnap.slidesAssetVersion ?? 0) + 1;
           const merged: QueueCarouselSnapshot = {
             ...prevSnap,
             zipBase64: newZip,
@@ -3564,7 +4529,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             slidePreviewBase64s: nextPreviews,
             slidePreviewBase64sInstagram: nextPreviewsIg,
             editableSlides: slidesForRender,
-            transcript,
+            transcript: transcriptForRender,
             socialCaption,
             layoutId,
             carouselOverride,
@@ -3577,6 +4542,16 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             socialMicroError: prevSnap.socialMicroError ?? null,
             processTiming: prevSnap.processTiming ?? null,
             frameColorAdjust: frameColorAdjustRef.current,
+            slidesAssetVersion: nextSlidesAssetVersion,
+            ...(prevBunny
+              ? {
+                  bunnyUrls: {
+                    ...prevBunny,
+                    slideUrls: [],
+                    slideUrlsInstagram: [],
+                  },
+                }
+              : {}),
           };
           const next = { ...qr, [aid]: merged };
           queueResultsRef.current = next;
@@ -3585,11 +4560,11 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       }
     } catch (err) {
       if (isQueueProcessingAbort(err)) {
-        setError(
+        failReRender(
           "Rebuild timed out after several minutes. Try again with fewer slides or a shorter video."
         );
       } else {
-        setError(err instanceof Error ? err.message : "Unknown error");
+        failReRender(err instanceof Error ? err.message : "Unknown error");
       }
     } finally {
       clearTimeout(renderTimeout);
@@ -3598,13 +4573,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       setReRenderLoading(false);
     }
   }, [
-    transcript,
-    socialCaption,
-    layoutId,
     backgroundFile,
     backgroundSource,
     buildSnapshotFromWorkspace,
     frameColorAdjust,
+    layoutId,
+    socialCaption,
   ]);
 
   const downloadZip = useCallback(() => {
@@ -3754,14 +4728,35 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   const regenerateImagePostCopy = useCallback(async () => {
     const aid = activeQueueIdRef.current;
-    let videoFile =
-      (aid ? queueRef.current.find((q) => q.id === aid)?.file : null) ?? null;
-    if (aid && videoFile && videoFile.size === 0) {
+    const activeRow = aid
+      ? queueRef.current.find((q) => q.id === aid)
+      : undefined;
+    const regenDriveFileId = activeRow?.driveFileId;
+    const sourceVideoUrl = storedSourceVideoUrl(
+      aid,
+      queueResultsRef.current
+    );
+    let videoFile = activeRow?.file ?? null;
+    if (
+      aid &&
+      videoFile &&
+      videoFile.size === 0 &&
+      !regenDriveFileId &&
+      !sourceVideoUrl
+    ) {
       videoFile = await rehydrateSourceVideoFile(aid);
     }
-    if (!videoFile || videoFile.size === 0 || transcript.length === 0) {
+    if (
+      !videoFile ||
+      (!hasCarouselVideoSource({
+        videoFile,
+        driveFileId: regenDriveFileId,
+        sourceVideoUrl,
+      })) ||
+      transcript.length === 0
+    ) {
       setError(
-        videoFile && videoFile.size === 0
+        videoFile && videoFile.size === 0 && !sourceVideoUrl && !regenDriveFileId
           ? "Source video isn't available on this device. Re-upload the original video to regenerate image-post copy."
           : "Need a video and transcript to regenerate image post copy.",
       );
@@ -3781,6 +4776,10 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       const ip = await postImagePostFromVideo(videoFile, transcript, {
         previousPlan: prevPlan,
         frameColorAdjust,
+        driveFileId: regenDriveFileId,
+        sourceJobId:
+          (regenDriveFileId ? activeRow?.shortJobId : null) ?? undefined,
+        sourceVideoUrl,
       });
       setImagePost(ip);
       setImagePostError(null);
@@ -3841,32 +4840,57 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
   }, [transcript]);
 
   const rerenderImagePostOverlay = useCallback(
-    async (hook: string, microCta: string): Promise<boolean> => {
+    async (
+      hook: string,
+      microCta: string
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
       const aid = activeQueueIdRef.current;
-      let videoFile =
-        (aid ? queueRef.current.find((q) => q.id === aid)?.file : null) ?? null;
-      if (aid && videoFile && videoFile.size === 0) {
-        videoFile = await rehydrateSourceVideoFile(aid);
-      }
+      const activeRow = aid
+        ? queueRef.current.find((q) => q.id === aid)
+        : undefined;
+      const videoFile = activeRow?.file ?? null;
+      const driveFileId = activeRow?.driveFileId;
+      const driveSourceJobId =
+        (driveFileId ? activeRow?.shortJobId : null) ?? undefined;
+      const sourceVideoUrl = storedSourceVideoUrl(
+        aid,
+        queueResultsRef.current
+      );
+      const useServerSourceVideo =
+        Boolean(sourceVideoUrl) && (!videoFile || videoFile.size === 0);
       const frameTime = imagePostFrameTimeRef.current;
+      const hasVideoSource = hasCarouselVideoSource({
+        videoFile,
+        driveFileId,
+        sourceVideoUrl,
+      });
       if (
-        !videoFile ||
-        videoFile.size === 0 ||
+        !hasVideoSource ||
         frameTime === undefined ||
         !Number.isFinite(frameTime)
       ) {
-        setError(
-          videoFile && videoFile.size === 0
-            ? "Source video isn't available on this device. Re-upload the original to update the image."
-            : "Need the video file and frame time to update the image.",
-        );
-        return false;
+        const message =
+          videoFile && videoFile.size === 0 && !sourceVideoUrl && !driveFileId
+            ? "Source video isn't available on this device (was processed on another session). Re-upload the original video to update the image."
+            : frameTime === undefined || !Number.isFinite(frameTime)
+              ? "Need the saved frame time to update the image. Regenerate the image post once, then try again."
+              : "Need the video file and frame time to update the image.";
+        setError(message);
+        return { ok: false, error: message };
       }
       setImagePostBusy(true);
       setError(null);
       try {
         const fd = new FormData();
-        fd.append("video", videoFile);
+        appendCarouselVideoIngestFields(
+          fd,
+          videoFile ?? new File([], "video.mp4"),
+          {
+            driveFileId,
+            sourceJobId: driveSourceJobId,
+            sourceVideoUrl: useServerSourceVideo ? sourceVideoUrl ?? undefined : undefined,
+          }
+        );
         fd.append("frameTimeSec", String(frameTime));
         fd.append("hook", hook);
         fd.append("microCta", microCta);
@@ -3911,10 +4935,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             };
           });
         }
-        return true;
+        return { ok: true };
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Could not update image");
-        return false;
+        const message =
+          e instanceof Error ? e.message : "Could not update image";
+        setError(message);
+        return { ok: false, error: message };
       } finally {
         setImagePostBusy(false);
       }
@@ -3924,23 +4950,35 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   const applyImagePostFrameColor = useCallback(async (): Promise<boolean> => {
     const aid = activeQueueIdRef.current;
-    let videoFile =
-      (aid ? queueRef.current.find((q) => q.id === aid)?.file : null) ?? null;
-    if (aid && videoFile && videoFile.size === 0) {
-      videoFile = await rehydrateSourceVideoFile(aid);
-    }
+    const activeRow = aid
+      ? queueRef.current.find((q) => q.id === aid)
+      : undefined;
+    const videoFile = activeRow?.file ?? null;
+    const driveFileId = activeRow?.driveFileId;
+    const driveSourceJobId =
+      (driveFileId ? activeRow?.shortJobId : null) ?? undefined;
+    const sourceVideoUrl = storedSourceVideoUrl(
+      aid,
+      queueResultsRef.current
+    );
+    const useServerSourceVideo =
+      Boolean(sourceVideoUrl) && (!videoFile || videoFile.size === 0);
     const ip = imagePost;
     const frameTime = ip?.frameTimeSec;
+    const hasVideoSource = hasCarouselVideoSource({
+      videoFile,
+      driveFileId,
+      sourceVideoUrl,
+    });
     if (
-      !videoFile ||
-      videoFile.size === 0 ||
+      !hasVideoSource ||
       !ip ||
       frameTime === undefined ||
       !Number.isFinite(frameTime)
     ) {
       setError(
-        videoFile && videoFile.size === 0
-          ? "Source video isn't available on this device. Re-upload the original to apply frame color."
+        videoFile && videoFile.size === 0 && !sourceVideoUrl && !driveFileId
+          ? "Source video isn't available on this device (was processed on another session). Re-upload the original to apply frame color."
           : "Need the video file and image post to apply frame color.",
       );
       return false;
@@ -3949,7 +4987,15 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     setError(null);
     try {
       const fd = new FormData();
-      fd.append("video", videoFile);
+      appendCarouselVideoIngestFields(
+        fd,
+        videoFile ?? new File([], "video.mp4"),
+        {
+          driveFileId,
+          sourceJobId: driveSourceJobId,
+          sourceVideoUrl: useServerSourceVideo ? sourceVideoUrl : undefined,
+        }
+      );
       fd.append("frameTimeSec", String(frameTime));
       fd.append("hook", ip.hook);
       fd.append("microCta", ip.microCta);
@@ -3995,6 +5041,45 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     }
   }, [imagePost]);
 
+  const setOutputReadyToSchedule = useCallback(
+    async (
+      queueItemId: string,
+      output: MultiplierOutputKey,
+      ready: boolean,
+    ) => {
+      setQueue((prev) => {
+        const next = prev.map((q) => {
+          if (q.id !== queueItemId) return q;
+          const outputs: MultiplierOutputsState = {
+            ...(q.outputs ?? {}),
+            [output]: {
+              ...(q.outputs?.[output] ?? { status: "done" as const }),
+              readyToSchedule: ready,
+            },
+          };
+          return { ...q, outputs };
+        });
+        queueRef.current = next;
+        return next;
+      });
+      const res = await patchMultiplierQueueItemOnHub(queueItemId, {
+        payload: {
+          outputs: {
+            [output]: { readyToSchedule: ready },
+          },
+        },
+      });
+      if (!res.ok) {
+        console.warn(
+          `[multiplier-queue] readyToSchedule patch failed for ${queueItemId}:`,
+          res.message,
+        );
+        setError(res.message);
+      }
+    },
+    [setError],
+  );
+
   const value = useMemo<CarouselWorkspaceValue>(
     () => ({
       queue,
@@ -4010,12 +5095,14 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       shortEditorialSkip,
       shortEditorialCuts,
       shortError,
+      shortOutputRevision,
       reelMp4Url,
       shortResumeBusy,
       shortResumeMessage,
       attachRecoveredShortFile,
       recoverInFlightShortForQueue,
       shortReprocessBusy,
+      shortReprocessProgress,
       reprocessActiveShortOutput,
       layoutId,
       setLayoutId,
@@ -4037,6 +5124,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       setSocialCaption,
       reRenderLoading,
       reRenderProgress,
+      reRenderError,
       backgroundSource,
       setBackgroundSource,
       backgroundFile,
@@ -4048,6 +5136,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       removeSlide,
       addSlide,
       moveSlide,
+      canReRenderZip,
+      canRegenerateImagePostCopy,
+      canRerenderImagePostOverlay,
       reRenderZip,
       downloadZip,
       downloadAllZips,
@@ -4073,13 +5164,17 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       processTiming,
       studioOutputs,
       setStudioOutputs,
-      hubQueueHydrationDone,
       rehydrateSourceVideoFile,
+      setOutputReadyToSchedule,
+      hubQueueHydrationDone,
     }),
     [
       queue,
       queueResults,
       activeQueueId,
+      canReRenderZip,
+      canRegenerateImagePostCopy,
+      canRerenderImagePostOverlay,
       selectQueueItem,
       removeQueueItem,
       renameQueueItem,
@@ -4091,12 +5186,14 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       shortEditorialSkip,
       shortEditorialCuts,
       shortError,
+      shortOutputRevision,
       reelMp4Url,
       shortResumeBusy,
       shortResumeMessage,
       attachRecoveredShortFile,
       recoverInFlightShortForQueue,
       shortReprocessBusy,
+      shortReprocessProgress,
       reprocessActiveShortOutput,
       layoutId,
       carouselOverride,
@@ -4115,6 +5212,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       setSocialCaption,
       reRenderLoading,
       reRenderProgress,
+      reRenderError,
       downloadAllZipsLoading,
       canDownloadAllZips,
       backgroundSource,
@@ -4124,6 +5222,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       removeSlide,
       addSlide,
       moveSlide,
+      canReRenderZip,
+      canRegenerateImagePostCopy,
+      canRerenderImagePostOverlay,
       reRenderZip,
       downloadZip,
       downloadAllZips,
@@ -4145,8 +5246,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       processTiming,
       studioOutputs,
       setStudioOutputs,
-      hubQueueHydrationDone,
       rehydrateSourceVideoFile,
+      setOutputReadyToSchedule,
+      hubQueueHydrationDone,
     ]
   );
 

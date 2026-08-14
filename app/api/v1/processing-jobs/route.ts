@@ -35,9 +35,10 @@ export const POST = withUser(async ({ req, user }) => {
   const videoLabel = requiredStr(body.videoLabel, "videoLabel");
   const sourceVideoUrl = str(body.sourceVideoUrl);
   const driveFileId = str(body.driveFileId);
-  if (!sourceVideoUrl && !driveFileId) {
+  const stitchJobId = str(body.stitchJobId);
+  if (!sourceVideoUrl && !driveFileId && !stitchJobId) {
     return errors.badRequest(
-      "Provide `sourceVideoUrl` and/or `driveFileId` so the worker can ingest the video after tab close.",
+      "Provide `sourceVideoUrl`, `driveFileId`, and/or `stitchJobId` so the worker can ingest the video after tab close.",
     );
   }
 
@@ -71,6 +72,7 @@ export const POST = withUser(async ({ req, user }) => {
     videoLabel,
     ...(sourceVideoUrl ? { sourceVideoUrl } : {}),
     ...(driveFileId ? { driveFileId } : {}),
+    ...(stitchJobId ? { stitchJobId } : {}),
     ...(typeof body.aiInstructions === "string"
       ? { aiInstructions: body.aiInstructions }
       : {}),
@@ -100,11 +102,12 @@ export const POST = withUser(async ({ req, user }) => {
     outputs,
     ...(sourceVideoUrl ? { bunnyUrls: { sourceVideoUrl } } : {}),
     ...(driveFileId ? { driveFileId } : {}),
+    ...(stitchJobId ? { stitchJobId } : {}),
     ...(typeof body.aiInstructions === "string"
       ? { aiInstructions: body.aiInstructions }
       : {}),
   };
-  const lockKey = sourceVideoUrl || driveFileId || queueItemId;
+  const lockKey = sourceVideoUrl || driveFileId || stitchJobId || queueItemId;
   const lockNamespace = `multiplier-job:${user.id}`;
   const maxAttempts =
     typeof body.maxAttempts === "number" && body.maxAttempts > 0
@@ -112,7 +115,7 @@ export const POST = withUser(async ({ req, user }) => {
       : DEFAULT_MULTIPLIER_MAX_ATTEMPTS;
 
   const result = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`
+    await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(
         hashtext(CAST(${lockNamespace} AS text)),
         hashtext(CAST(${lockKey} AS text))
@@ -133,6 +136,7 @@ export const POST = withUser(async ({ req, user }) => {
       queueItemId,
       sourceVideoUrl: sourceVideoUrl || undefined,
       driveFileId: driveFileId || undefined,
+      stitchJobId: stitchJobId || undefined,
       db: tx,
     });
 

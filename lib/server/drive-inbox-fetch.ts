@@ -123,3 +123,48 @@ export async function downloadDriveSourceToPath(
   }
   await downloadDriveInboxVideoToPath(driveId, destPath);
 }
+
+/**
+ * Wait for a Video-to-Short stitch job to complete, then download the
+ * stitched MP4. Used by the Hub worker so Stitch does not round-trip
+ * the file through the browser.
+ */
+export async function downloadStitchJobOutputToPath(
+  jobId: string,
+  destPath: string,
+): Promise<void> {
+  const id = jobId.trim();
+  if (!JOB_ID_RE.test(id)) {
+    throw new Error("Invalid stitch job id.");
+  }
+  const base = getVideoToShortApiBaseUrl();
+  const deadline = Date.now() + SOURCE_WAIT_DEADLINE_MS;
+  for (;;) {
+    const res = await fetch(`${base}/api/jobs/${encodeURIComponent(id)}`, {
+      cache: "no-store",
+    });
+    if (res.status === 404) {
+      throw new Error("Stitch job not found.");
+    }
+    if (res.ok) {
+      const j = (await res.json()) as { status?: string; error?: unknown };
+      if (j.status === "failed") {
+        throw new Error(
+          typeof j.error === "string" && j.error.trim()
+            ? j.error.trim()
+            : "Stitch failed on the server.",
+        );
+      }
+      if (j.status === "completed") break;
+    }
+    if (Date.now() > deadline) {
+      throw new Error("Timed out waiting for the server stitch to finish.");
+    }
+    await sleep(SOURCE_POLL_INTERVAL_MS);
+  }
+  await fetchUrlToFile(
+    `${base}/api/jobs/${encodeURIComponent(id)}/download`,
+    destPath,
+    { timeoutMs: DRIVE_FETCH_TIMEOUT_MS },
+  );
+}

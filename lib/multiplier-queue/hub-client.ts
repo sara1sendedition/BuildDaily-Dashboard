@@ -63,6 +63,8 @@ export type MultiplierQueuePayload = {
   processingJobId?: string;
   /** Drive inbox file id when ingested from Drive. */
   driveFileId?: string;
+  /** Video-to-Short stitch job; Hub worker waits and downloads the MP4. */
+  stitchJobId?: string;
   /** Per-output process status + ready-to-schedule flags. */
   outputs?: MultiplierOutputsState;
   /** Last failure message when status is failed. */

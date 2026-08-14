@@ -33,6 +33,7 @@ export function mergeHubQueuePayload(
     "processingJobId",
     "shortJobId",
     "driveFileId",
+    "stitchJobId",
     "shortOutputRevision",
     "error",
   ]);
@@ -83,6 +84,7 @@ export function mergeHubQueuePayload(
     "processingJobId",
     "shortJobId",
     "driveFileId",
+    "stitchJobId",
     "shortOutputRevision",
     "error",
   ] as const) {
@@ -98,12 +100,36 @@ export function mergeHubQueuePayload(
   return merged;
 }
 
+/** Drop infra dumps and transcript-shaped blobs from user-facing errors. */
+export function sanitizeQueueErrorMessage(raw: string): string {
+  const msg = raw.trim();
+  if (!msg) return "Processing failed.";
+  const lower = msg.toLowerCase();
+  if (
+    lower.includes("prisma.") ||
+    lower.includes("$queryraw") ||
+    lower.includes("queryraw") ||
+    lower.includes("deserialize column")
+  ) {
+    return "Could not start the server job. Try Add again.";
+  }
+  if (
+    msg.length > 600 ||
+    /\[video message\s*-\s*transcript\]/i.test(msg) ||
+    /coach sara\s*\(/i.test(msg) ||
+    (msg.match(/\[\d{2}:\d{2}\]/g)?.length ?? 0) >= 3
+  ) {
+    return "Processing failed.";
+  }
+  return msg.slice(0, 500);
+}
+
 /** Best-effort failure text from payload.error or per-output errors. */
 export function queuePayloadFailureMessage(
   payload: Record<string, unknown>,
 ): string | undefined {
   if (typeof payload.error === "string" && payload.error.trim()) {
-    return payload.error.trim();
+    return sanitizeQueueErrorMessage(payload.error);
   }
   const outputs =
     payload.outputs && typeof payload.outputs === "object"
@@ -112,7 +138,9 @@ export function queuePayloadFailureMessage(
   if (!outputs) return undefined;
   for (const key of ["carousel", "photo", "short"] as const) {
     const err = outputs[key]?.error;
-    if (typeof err === "string" && err.trim()) return err.trim();
+    if (typeof err === "string" && err.trim()) {
+      return sanitizeQueueErrorMessage(err);
+    }
   }
   return undefined;
 }

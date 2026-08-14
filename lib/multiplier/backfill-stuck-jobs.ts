@@ -17,6 +17,7 @@ type QueuePayload = {
   v?: number;
   processingJobId?: string;
   driveFileId?: string;
+  stitchJobId?: string;
   bunnyUrls?: { sourceVideoUrl?: string };
   outputs?: MultiplierOutputsState;
   aiInstructions?: string;
@@ -129,7 +130,9 @@ export async function backfillStuckMultiplierProcessingJobs(opts?: {
         : "";
     const driveFileId =
       typeof payload.driveFileId === "string" ? payload.driveFileId.trim() : "";
-    if (!sourceVideoUrl && !driveFileId) {
+    const stitchJobId =
+      typeof payload.stitchJobId === "string" ? payload.stitchJobId.trim() : "";
+    if (!sourceVideoUrl && !driveFileId && !stitchJobId) {
       skipped += 1;
       continue;
     }
@@ -139,6 +142,7 @@ export async function backfillStuckMultiplierProcessingJobs(opts?: {
       queueItemId: row.id,
       sourceVideoUrl: sourceVideoUrl || undefined,
       driveFileId: driveFileId || undefined,
+      stitchJobId: stitchJobId || undefined,
     });
     if (active) {
       try {
@@ -193,6 +197,7 @@ export async function backfillStuckMultiplierProcessingJobs(opts?: {
       videoLabel,
       ...(sourceVideoUrl ? { sourceVideoUrl } : {}),
       ...(driveFileId ? { driveFileId } : {}),
+      ...(stitchJobId ? { stitchJobId } : {}),
       ...(typeof payload.aiInstructions === "string"
         ? { aiInstructions: payload.aiInstructions }
         : {}),
@@ -223,6 +228,7 @@ export async function backfillStuckMultiplierProcessingJobs(opts?: {
           }
         : {}),
       ...(driveFileId ? { driveFileId } : {}),
+      ...(stitchJobId ? { stitchJobId } : {}),
     };
 
     try {
@@ -340,7 +346,9 @@ export async function backfillFailedShortCreates(opts?: {
         : "";
     const driveFileId =
       typeof payload.driveFileId === "string" ? payload.driveFileId.trim() : "";
-    if (!sourceVideoUrl && !driveFileId) {
+    const stitchJobId =
+      typeof payload.stitchJobId === "string" ? payload.stitchJobId.trim() : "";
+    if (!sourceVideoUrl && !driveFileId && !stitchJobId) {
       skipped += 1;
       continue;
     }
@@ -369,6 +377,7 @@ export async function backfillFailedShortCreates(opts?: {
       videoLabel,
       ...(sourceVideoUrl ? { sourceVideoUrl } : {}),
       ...(driveFileId ? { driveFileId } : {}),
+      ...(stitchJobId ? { stitchJobId } : {}),
       ...(typeof payload.aiInstructions === "string"
         ? { aiInstructions: payload.aiInstructions }
         : {}),
@@ -398,6 +407,8 @@ export async function backfillFailedShortCreates(opts?: {
             },
           }
         : {}),
+      ...(driveFileId ? { driveFileId } : {}),
+      ...(stitchJobId ? { stitchJobId } : {}),
     };
 
     try {

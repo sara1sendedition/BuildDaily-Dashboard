@@ -1,7 +1,10 @@
 import * as fs from "fs/promises";
 import { isAllowedSourceVideoUrl } from "@/lib/allowed-source-video-url";
 import { fetchUrlToFile } from "@/lib/fetch-url-to-file";
-import { downloadDriveSourceToPath } from "@/lib/server/drive-inbox-fetch";
+import {
+  downloadDriveSourceToPath,
+  downloadStitchJobOutputToPath,
+} from "@/lib/server/drive-inbox-fetch";
 
 type EnsureIngestVideoOptions = {
   /** Per-route fetch timeout when pulling from Bunny (ms). */
@@ -34,7 +37,12 @@ export async function ensureIngestVideoOnDisk(
 
   const driveFileId = String(fields.driveFileId ?? "").trim();
   const sourceJobId = String(fields.sourceJobId ?? "").trim();
+  const stitchJobId = String(fields.stitchJobId ?? "").trim();
   const fetchServerSideVideo = async (): Promise<void> => {
+    if (stitchJobId) {
+      await downloadStitchJobOutputToPath(stitchJobId, videoPath);
+      return;
+    }
     if (driveFileId || sourceJobId) {
       await downloadDriveSourceToPath({ sourceJobId, driveFileId }, videoPath);
       return;

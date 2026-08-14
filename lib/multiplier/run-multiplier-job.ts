@@ -18,6 +18,7 @@ import {
   type MultiplierOutputsState,
   type MultiplierOutputState,
 } from "@/lib/multiplier-queue/output-state";
+import { sanitizeQueueErrorMessage } from "@/lib/multiplier-queue/merge-hub-payload";
 import {
   parseMultiplierJobPayload,
   type MultiplierProcessingJobPayload,
@@ -125,13 +126,14 @@ async function patchQueueOutputs(opts: {
       typeof opts.extraPayload?.error === "string"
         ? opts.extraPayload.error
         : undefined;
-    nextPayload.error =
+    nextPayload.error = sanitizeQueueErrorMessage(
       extraErr?.trim() ||
-      (typeof fromOutputs === "string" && fromOutputs.trim()
-        ? fromOutputs.trim()
-        : typeof nextPayload.error === "string" && nextPayload.error.trim()
-          ? nextPayload.error.trim()
-          : "Processing failed.");
+        (typeof fromOutputs === "string" && fromOutputs.trim()
+          ? fromOutputs.trim()
+          : typeof nextPayload.error === "string" && nextPayload.error.trim()
+            ? nextPayload.error.trim()
+            : "Processing failed."),
+    );
   } else {
     delete nextPayload.error;
   }
@@ -365,10 +367,10 @@ export async function runMultiplierProcessingJob(opts: {
   if (!parsed) {
     return { ok: false, error: "Invalid multiplier job payload." };
   }
-  if (!parsed.sourceVideoUrl && !parsed.driveFileId) {
+  if (!parsed.sourceVideoUrl && !parsed.driveFileId && !parsed.stitchJobId) {
     return {
       ok: false,
-      error: "Job is missing sourceVideoUrl and driveFileId.",
+      error: "Job is missing a video source (URL, Drive id, or stitch job).",
     };
   }
 
@@ -502,6 +504,7 @@ export async function runMultiplierProcessingJob(opts: {
 
     const fields: Record<string, string> = {};
     if (parsed.driveFileId) fields.driveFileId = parsed.driveFileId;
+    if (parsed.stitchJobId) fields.stitchJobId = parsed.stitchJobId;
     if (parsed.sourceVideoUrl) fields.sourceVideoUrl = parsed.sourceVideoUrl;
     if (needsIngest) {
       await ensureIngestVideoOnDisk(videoPath, fields, false, {
@@ -870,7 +873,9 @@ export async function runMultiplierProcessingJob(opts: {
     }
     return { ok: true };
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Multiplier job failed.";
+    const message = sanitizeQueueErrorMessage(
+      e instanceof Error ? e.message : "Multiplier job failed.",
+    );
     await patchQueueOutputs({
       queueItemId: parsed.queueItemId,
       userId: opts.userId,
@@ -900,17 +905,22 @@ function shortNeedsReelFinalize(
   payload: Record<string, unknown>,
 ): boolean {
   if (!short) return false;
-  if (short.status === "processing") return true;
-  // Aggregate row can be `done` when carousel/photo succeeded but Short failed
-  // after a completed encode with a missed MP4 download — retry while job id lives.
-  if (short.status !== "failed") return false;
   const bunny =
     payload.bunnyUrls && typeof payload.bunnyUrls === "object"
       ? (payload.bunnyUrls as Record<string, unknown>)
       : {};
-  if (typeof bunny.reelMp4Url === "string" && bunny.reelMp4Url.trim()) {
-    return false;
+  const hasReel =
+    typeof bunny.reelMp4Url === "string" && Boolean(bunny.reelMp4Url.trim());
+
+  if (short.status === "processing") {
+    // Still need finalize when the CDN reel is missing. If the reel already
+    // exists, treat as needing a status flip to done (handled below).
+    return true;
   }
+  // Aggregate row can be `done` when carousel/photo succeeded but Short failed
+  // after a completed encode with a missed MP4 download — retry while job id lives.
+  if (short.status !== "failed") return false;
+  if (hasReel) return false;
   const err = typeof short.error === "string" ? short.error.toLowerCase() : "";
   return (
     err.includes("no reel mp4") ||
@@ -949,6 +959,31 @@ export async function finalizeInFlightShortOutputs(opts: {
     const shortJobId =
       typeof payload.shortJobId === "string" ? payload.shortJobId.trim() : "";
     if (!shortJobId) continue;
+
+    const existingBunny =
+      payload.bunnyUrls && typeof payload.bunnyUrls === "object"
+        ? (payload.bunnyUrls as BunnyAssetUrls)
+        : undefined;
+    // Stuck "processing" after a successful Bunny upload: flip to done without
+    // re-downloading the Short MP4.
+    if (
+      short.status === "processing" &&
+      typeof existingBunny?.reelMp4Url === "string" &&
+      existingBunny.reelMp4Url.trim()
+    ) {
+      await patchQueueOutputs({
+        queueItemId: row.id,
+        userId: row.userId,
+        outputs: {
+          short: { status: "done", progress: undefined, error: undefined },
+        },
+        bunnyUrls: existingBunny,
+        extraPayload: { shortJobId },
+        kind: "short",
+      });
+      finished += 1;
+      continue;
+    }
 
     const shortAttempts =
       typeof short.attempts === "number" && Number.isFinite(short.attempts)
@@ -992,6 +1027,10 @@ export async function finalizeInFlightShortOutputs(opts: {
         typeof payload.driveFileId === "string"
           ? payload.driveFileId.trim()
           : "";
+      const stitchJobIdPayload =
+        typeof payload.stitchJobId === "string"
+          ? payload.stitchJobId.trim()
+          : "";
 
       // Expired Short server jobs: recreate instead of failing the whole batch.
       // Cap recreates so a down Short server cannot loop forever.
@@ -1001,7 +1040,7 @@ export async function finalizeInFlightShortOutputs(opts: {
           : 0;
       if (
         expired &&
-        (sourceVideoUrl || driveFileId) &&
+        (sourceVideoUrl || driveFileId || stitchJobIdPayload) &&
         recreateAttempts < 2
       ) {
         const tmpDir = path.join(tmpdir(), `mult-short-recreate-${randomUUID()}`);
@@ -1011,6 +1050,7 @@ export async function finalizeInFlightShortOutputs(opts: {
           const fields: Record<string, string> = {};
           if (sourceVideoUrl) fields.sourceVideoUrl = sourceVideoUrl;
           if (driveFileId) fields.driveFileId = driveFileId;
+          if (stitchJobIdPayload) fields.stitchJobId = stitchJobIdPayload;
           await ensureIngestVideoOnDisk(tmpVideo, fields, false, {
             fetchTimeoutMs: 600_000,
           });

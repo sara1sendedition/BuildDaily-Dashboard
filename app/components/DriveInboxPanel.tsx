@@ -1,7 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clientApiPath } from "@/lib/client-api-path";
+import { videoMimeFromName } from "@/lib/drive-inbox-download";
+import { uploadStitchRowFromDrive } from "@/lib/run-stitch";
+import { generateStitchId } from "@/lib/stitch-batch-state";
 
 export type DriveInboxFile = {
   id: string;
@@ -12,7 +15,13 @@ export type DriveInboxFile = {
 };
 
 type Props = {
-  onEnqueueFiles: (files: File[]) => void;
+  onEnqueueFiles: (
+    files: File[],
+    opts?: {
+      driveFileIdsByIndex?: Array<string | undefined>;
+      stitchJobIdsByIndex?: Array<string | undefined>;
+    }
+  ) => void;
   disabled?: boolean;
 };
 
@@ -22,32 +31,6 @@ type PanelMode =
   | "not-configured"
   | "ready"
   | "error";
-
-function filenameFromDisposition(header: string | null, fallback: string): string {
-  if (!header) return fallback;
-  const m = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(header);
-  if (m?.[1]) {
-    try {
-      return decodeURIComponent(m[1].replace(/"/g, ""));
-    } catch {
-      return m[1];
-    }
-  }
-  return fallback;
-}
-
-async function blobToVideoFile(
-  res: Response,
-  fallbackName: string
-): Promise<File> {
-  const blob = await res.blob();
-  const name = filenameFromDisposition(
-    res.headers.get("content-disposition"),
-    fallbackName
-  );
-  const type = blob.type || "video/mp4";
-  return new File([blob], name, { type });
-}
 
 function driveThumbnailUrl(fileId: string): string {
   return clientApiPath(
@@ -113,7 +96,9 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
   const [mode, setMode] = useState<PanelMode>("loading");
   const [files, setFiles] = useState<DriveInboxFile[]>([]);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const stitchBusyRef = useRef(false);
+  const [stitchBusy, setStitchBusy] = useState(false);
+  const [stitchProgress, setStitchProgress] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(true);
@@ -172,7 +157,6 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
   }, []);
 
   useEffect(() => {
-    // Only hit Drive when expanded — keeps collapsed default cheap.
     if (!collapsed) void loadInbox();
   }, [collapsed, loadInbox]);
 
@@ -182,27 +166,18 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
     );
   };
 
-  const addOneToQueue = async (f: DriveInboxFile) => {
-    setBusy(true);
+  const addOneToQueue = (f: DriveInboxFile) => {
+    if (stitchBusy) return;
     setError(null);
-    try {
-      const r = await fetch(
-        clientApiPath(
-          `/api/video-to-short/drive/inbox/${encodeURIComponent(f.id)}/download`
-        ),
-        { cache: "no-store" }
-      );
-      if (!r.ok) {
-        setError(await r.text());
-        return;
-      }
-      const file = await blobToVideoFile(r, f.name);
-      onEnqueueFiles([file]);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Drive download failed");
-    } finally {
-      setBusy(false);
-    }
+    // Server-side ingest: enqueue a zero-byte placeholder (name/type only)
+    // with the Drive file id. Every processing call sends the id and the
+    // servers pull the video straight from Drive — the old flow streamed the
+    // whole file through this browser (and back up), which reliably failed
+    // for large videos.
+    const placeholder = new File([], f.name, {
+      type: videoMimeFromName(f.name),
+    });
+    onEnqueueFiles([placeholder], { driveFileIdsByIndex: [f.id] });
   };
 
   const stitchSelectedToQueue = async () => {
@@ -210,31 +185,39 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
       setError("Select at least 2 clips to stitch");
       return;
     }
-    setBusy(true);
+    if (stitchBusyRef.current || disabled) return;
+    stitchBusyRef.current = true;
+    setStitchBusy(true);
+    setStitchProgress("Starting server-side stitch…");
     setError(null);
-    const fd = new FormData();
-    for (const id of selectedIds) fd.append("file_ids", id);
+    const correlationId = generateStitchId();
+    const orderedNames = selectedIds.map((id) => {
+      const match = files.find((f) => f.id === id);
+      return match?.name ?? "clip";
+    });
+    const stem =
+      orderedNames[0]?.replace(/\.[^.]+$/, "").slice(0, 40) || "drive";
+    const outputName = `${stem}_stitched.mp4`;
     try {
-      const r = await fetch(clientApiPath("/api/video-to-short/drive/stitch-raw"), {
-        method: "POST",
-        body: fd,
+      const upload = await uploadStitchRowFromDrive(
+        selectedIds,
+        correlationId,
+      );
+      const placeholder = new File([], outputName, {
+        type: "video/mp4",
       });
-      if (!r.ok) {
-        setError(await r.text());
-        return;
-      }
-      const file = await blobToVideoFile(r, "drive_stitch.mp4");
-      onEnqueueFiles([file]);
+      onEnqueueFiles([placeholder], {
+        stitchJobIdsByIndex: [upload.jobId],
+      });
       setSelectedIds([]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Drive stitch failed");
     } finally {
-      setBusy(false);
+      stitchBusyRef.current = false;
+      setStitchBusy(false);
+      setStitchProgress(null);
     }
   };
-
-  const fileCountLabel =
-    mode === "ready" && files.length > 0 ? ` (${files.length})` : "";
 
   return (
     <div className="rounded-2xl border border-stone-200/80 bg-stone-50/80 p-4 text-left shadow-sm">
@@ -253,14 +236,15 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
             ▸
           </span>
           <h3 className="text-sm font-semibold text-stone-900">
-            Google Drive inbox{fileCountLabel}
+            Google Drive inbox
+            {mode === "ready" && files.length > 0 ? ` (${files.length})` : ""}
           </h3>
         </button>
         {!collapsed ? (
           <button
             type="button"
             onClick={() => void loadInbox()}
-            disabled={loading || busy || disabled}
+            disabled={loading || stitchBusy || disabled}
             className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
           >
             {loading ? "Refreshing…" : "Refresh"}
@@ -296,11 +280,13 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
               </span>
               <button
                 type="button"
-                disabled={busy || disabled}
+                disabled={stitchBusy || disabled}
                 onClick={() => void stitchSelectedToQueue()}
                 className="rounded-lg bg-palette-moss px-3 py-1.5 text-xs font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
               >
-                {busy ? "Stitching…" : "Stitch & add to queue"}
+                {stitchBusy
+                  ? stitchProgress?.slice(0, 48) || "Stitching…"
+                  : "Stitch & add to queue"}
               </button>
             </div>
           ) : null}
@@ -324,7 +310,7 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
                       <input
                         type="checkbox"
                         checked={selected}
-                        disabled={busy || disabled}
+                        disabled={stitchBusy || disabled}
                         onChange={() => toggleSelect(f.id)}
                       />
                       {selected ? (
@@ -343,8 +329,8 @@ export function DriveInboxPanel({ onEnqueueFiles, disabled }: Props) {
                     </div>
                     <button
                       type="button"
-                      disabled={busy || disabled}
-                      onClick={() => void addOneToQueue(f)}
+                      disabled={stitchBusy || disabled}
+                      onClick={() => addOneToQueue(f)}
                       className="shrink-0 rounded-lg bg-palette-moss px-2 py-1 font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
                     >
                       Add

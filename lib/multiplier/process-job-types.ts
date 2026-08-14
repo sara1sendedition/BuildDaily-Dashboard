@@ -11,6 +11,8 @@ export type MultiplierProcessingJobPayload = {
   videoLabel: string;
   sourceVideoUrl?: string;
   driveFileId?: string;
+  /** Video-to-Short stitch job; worker waits for it and downloads the MP4. */
+  stitchJobId?: string;
   aiInstructions?: string;
   outputsWanted: {
     carousel: boolean;
@@ -50,6 +52,9 @@ export function parseMultiplierJobPayload(
       : {}),
     ...(typeof o.driveFileId === "string" && o.driveFileId.trim()
       ? { driveFileId: o.driveFileId.trim() }
+      : {}),
+    ...(typeof o.stitchJobId === "string" && o.stitchJobId.trim()
+      ? { stitchJobId: o.stitchJobId.trim() }
       : {}),
     ...(typeof o.aiInstructions === "string"
       ? { aiInstructions: o.aiInstructions }

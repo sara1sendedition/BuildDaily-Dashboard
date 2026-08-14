@@ -17,19 +17,16 @@ import {
   rowIsAllDrive,
   type ClipEntry,
 } from "@/lib/stitch-clips";
-import {
-  stashStitchedFiles,
-  type StitchHandoffDestination,
-} from "@/lib/stitch-handoff";
 import { incrementClipsStitched } from "@/lib/hub/metrics-store";
+import { enqueueServerMultiplierJob } from "@/lib/multiplier-queue/processing-jobs-client";
 import {
-  downloadStitchOutput,
-  pollStitchJobUntilDone,
   recoverStitchJobIdByCorrelationId,
-  runStitchRow,
-  runStitchRowFromDrive,
+  uploadStitchRow,
+  uploadStitchRowFromDrive,
 } from "@/lib/run-stitch";
+import { uploadFileToBunnyStorage } from "@/lib/storage/bunny-upload-client";
 import {
+  appendStitchBatchRows,
   clearStitchBatch,
   describeAgeMs,
   generateStitchId,
@@ -41,37 +38,79 @@ import {
   type StitchRowState,
 } from "@/lib/stitch-batch-state";
 
+/** How many stitch rows to upload/poll at once (mirrors Multiplier’s pool). */
+const STITCH_CONCURRENCY = 3;
+
+async function enqueueMultiplierFromStitch(opts: {
+  videoLabel: string;
+  stitchJobId?: string;
+  driveFileId?: string;
+  sourceVideoUrl?: string;
+  aiInstructions?: string;
+}): Promise<void> {
+  const created = await enqueueServerMultiplierJob({
+    videoLabel: opts.videoLabel,
+    ...(opts.stitchJobId ? { stitchJobId: opts.stitchJobId } : {}),
+    ...(opts.driveFileId ? { driveFileId: opts.driveFileId } : {}),
+    ...(opts.sourceVideoUrl ? { sourceVideoUrl: opts.sourceVideoUrl } : {}),
+    ...(opts.aiInstructions?.trim()
+      ? { aiInstructions: opts.aiInstructions.trim() }
+      : {}),
+  });
+  if (!created.ok) {
+    throw new Error(
+      created.message || "Could not queue Multiplier on the server.",
+    );
+  }
+}
+
+async function stitchJobIdAfterUpload(
+  correlationId: string,
+  upload: () => Promise<{ jobId: string }>,
+): Promise<string> {
+  try {
+    return (await upload()).jobId;
+  } catch (e) {
+    const recovered = await recoverStitchJobIdByCorrelationId(
+      correlationId,
+    ).catch(() => null);
+    if (!recovered) throw e;
+    return recovered;
+  }
+}
+
 /**
- * Stitch page — accepts N video clips (e.g. a shoot recorded in multiple
- * takes), concatenates them in order on the backend, then hands the
- * resulting MP4 to the home page's normal upload flow. The home page
- * runs the parallel Short + Carousel + Image-Post + X/Threads pipeline,
- * so one click here gives all five outputs.
- *
- * Why "stitch only" + handoff instead of running the full pipeline here:
- *   - Home page already has the full parallel orchestration. Reusing it
- *     avoids duplicating Short generation work.
- *   - Studio run notes the user types here are written to the SAME
- *     localStorage key the home page reads, so they carry over
- *     automatically.
- *
- * Resilience model (May 2026 rewrite):
- *   - The backend stitch endpoint is now async-job based. Per-row state
- *     (correlationId + jobId + status) is persisted to localStorage in
- *     ``stitch:batchState`` BEFORE each upload starts. If the laptop
- *     closes mid-stitch (or the tab crashes), the server keeps stitching
- *     and the recovery banner on next mount lets the user resume — the
- *     output is still server-side, identified by jobId.
+ * Stitch page — concatenates clips on the Video-to-Short backend, then
+ * creates a durable Multiplier ProcessingJob (Drive id, stitch job id, or
+ * Bunny URL). Hub cron ingest → carousel/photo/short. The laptop can close
+ * after enqueue; the stitched MP4 is never downloaded into this browser.
  */
+
+type RowRunStatus = "idle" | "queued" | "running" | "done" | "failed";
 
 type StitchRow = {
   id: string;
   clips: ClipEntry[];
   aiInstructions: string;
   showAiInstructions: boolean;
+  runStatus: RowRunStatus;
+  runProgress?: string;
+  runError?: string;
+  /** Index into ``stitch:batchState`` while this row is in a Process run. */
+  batchRowIndex?: number;
 };
 
-type Status = "idle" | "uploading" | "redirecting" | "error" | "resuming";
+type Status = "idle" | "uploading" | "error" | "resuming";
+
+type StitchWorkItem = {
+  uiRowId: string;
+  batchRowIndex: number;
+  correlationId: string;
+  outputFilename: string;
+  clips: ClipEntry[];
+  aiInstructions: string;
+  label: string;
+};
 
 type RecoveryBannerState = {
   batch: StitchBatchState;
@@ -107,11 +146,18 @@ function safeRandomId(): string {
 export default function StitchPage() {
   const router = useRouter();
   const [rows, setRows] = useState<StitchRow[]>([
-    { id: safeRandomId(), clips: [], aiInstructions: "", showAiInstructions: false },
+    {
+      id: safeRandomId(),
+      clips: [],
+      aiInstructions: "",
+      showAiInstructions: false,
+      runStatus: "idle",
+    },
   ]);
   const [status, setStatus] = useState<Status>("idle");
   const [progressMsg, setProgressMsg] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
+  const [handedOffCount, setHandedOffCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pickerRowId, setPickerRowId] = useState<string | null>(null);
   const [driveModalRowId, setDriveModalRowId] = useState<string | null>(null);
@@ -121,35 +167,18 @@ export default function StitchPage() {
   const [dragOverVideoId, setDragOverVideoId] = useState<string | null>(null);
   const [recoveryBanner, setRecoveryBanner] =
     useState<RecoveryBannerState | null>(null);
-  const [handoffDestination, setHandoffDestination] =
-    useState<StitchHandoffDestination>("multiplier");
 
-  function updateHandoffDestination(next: StitchHandoffDestination): void {
-    setHandoffDestination(next);
-    const batch = readStitchBatch();
-    if (!batch) return;
-    writeStitchBatch({ ...batch, destination: next });
-  }
+  const pendingWorkRef = useRef<StitchWorkItem[]>([]);
+  const inFlightRef = useRef(0);
+  const handedOffCountRef = useRef(0);
+  const failedCountRef = useRef(0);
 
-  // On mount, restore handoff destination from ?to=editor or an in-flight
-  // batch, then check whether a previous stitch batch left recoverable work.
+  // On mount, check whether a previous stitch batch left in-flight work in
+  // localStorage. We only show the recovery banner when at least one row
+  // is still non-terminal — a batch where every row is already
+  // "completed"/"failed" is just stale, so we clear it and start fresh.
   useEffect(() => {
-    let restoredDestination: StitchHandoffDestination | null = null;
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("to") === "editor") {
-        restoredDestination = "video-editor";
-      }
-    } catch {
-      /* ignore */
-    }
     const batch = readStitchBatch();
-    if (batch?.destination === "video-editor" || batch?.destination === "multiplier") {
-      restoredDestination = batch.destination;
-    }
-    if (restoredDestination) {
-      setHandoffDestination(restoredDestination);
-    }
     if (!batch) return;
     if (!hasIncompleteRows(batch)) {
       clearStitchBatch();
@@ -203,6 +232,12 @@ export default function StitchPage() {
                   file: f,
                 })),
               ],
+              runStatus:
+                r.runStatus === "done" || r.runStatus === "failed"
+                  ? "idle"
+                  : r.runStatus,
+              runError: undefined,
+              runProgress: undefined,
             }
           : r
       )
@@ -218,6 +253,12 @@ export default function StitchPage() {
           ? {
               ...r,
               clips: [...r.clips, ...driveClipsFromInbox(picks)],
+              runStatus:
+                r.runStatus === "done" || r.runStatus === "failed"
+                  ? "idle"
+                  : r.runStatus,
+              runError: undefined,
+              runProgress: undefined,
             }
           : r
       )
@@ -228,7 +269,13 @@ export default function StitchPage() {
   function addRow(): void {
     setRows((prev) => [
       ...prev,
-      { id: safeRandomId(), clips: [], aiInstructions: "", showAiInstructions: false },
+      {
+        id: safeRandomId(),
+        clips: [],
+        aiInstructions: "",
+        showAiInstructions: false,
+        runStatus: "idle",
+      },
     ]);
   }
 
@@ -238,13 +285,44 @@ export default function StitchPage() {
       const next = prev.filter((r) => r.id !== rowId);
       return next.length > 0
         ? next
-        : [{ id: safeRandomId(), clips: [], aiInstructions: "", showAiInstructions: false }];
+        : [
+            {
+              id: safeRandomId(),
+              clips: [],
+              aiInstructions: "",
+              showAiInstructions: false,
+              runStatus: "idle",
+            },
+          ];
     });
+  }
+
+  function patchUiRow(
+    rowId: string,
+    patch: Partial<StitchRow>,
+  ): void {
+    setRows((prev) =>
+      prev.map((r) => (r.id === rowId ? { ...r, ...patch } : r)),
+    );
+  }
+
+  function rowIsLocked(row: StitchRow): boolean {
+    return row.runStatus === "queued" || row.runStatus === "running";
   }
 
   function clearRow(rowId: string): void {
     setRows((prev) =>
-      prev.map((r) => (r.id === rowId ? { ...r, clips: [] } : r))
+      prev.map((r) =>
+        r.id === rowId
+          ? {
+              ...r,
+              clips: [],
+              runStatus: r.runStatus === "failed" ? "idle" : r.runStatus,
+              runError: undefined,
+              runProgress: undefined,
+            }
+          : r,
+      ),
     );
   }
 
@@ -311,148 +389,247 @@ export default function StitchPage() {
     return `${stem}_stitched.mp4`;
   }
 
-  async function startStitch(): Promise<void> {
-    setErrorMsg("");
-    setRecoveryBanner(null);
-    const nonEmptyRows = rows.filter((r) => r.clips.length > 0);
-    if (nonEmptyRows.length < 1) {
-      setErrorMsg("Add at least one video with clips first.");
+  function refreshPoolProgress(): void {
+    const queued = pendingWorkRef.current.length;
+    const running = inFlightRef.current;
+    const done = handedOffCountRef.current;
+    const failed = failedCountRef.current;
+    if (running === 0 && queued === 0) {
+      if (done === 0 && failed > 0) {
+        setStatus("error");
+        setProgressMsg("");
+        setErrorMsg(
+          failed === 1
+            ? "Stitch failed for that video."
+            : `All ${failed} videos failed.`,
+        );
+      } else {
+        setStatus("idle");
+        const failNote =
+          failed > 0
+            ? ` ${failed} failed — re-add clips on those rows to retry.`
+            : "";
+        setProgressMsg(
+          done > 0
+            ? `${done} stitched video${done === 1 ? "" : "s"} sent to Multiplier.${failNote} Keep adding here, or open Multiplier to edit.`
+            : "",
+        );
+        if (!hasIncompleteRows(readStitchBatch())) {
+          clearStitchBatch();
+        }
+      }
       return;
     }
     setStatus("uploading");
+    setProgressMsg(
+      `Stitching ${running} in parallel` +
+        (queued > 0 ? ` · ${queued} queued` : "") +
+        (done > 0 ? ` · ${done} handed off` : "") +
+        (failed > 0 ? ` · ${failed} failed` : "") +
+        "…",
+    );
+  }
 
-    // Build the initial localStorage batch snapshot BEFORE any upload starts.
-    // The correlation IDs in this snapshot are what lets us recover the
-    // server-side jobIds if the lid closes after upload-bytes-land but
-    // before the response reaches us.
-    const batchId = generateStitchId();
-    const initialRows: StitchRowState[] = nonEmptyRows.map((row, i) => ({
-      rowIndex: i,
-      correlationId: generateStitchId(),
-      jobId: null,
-      status: "pending",
-      aiInstructions: row.aiInstructions.trim() || undefined,
-      outputFilename: stitchedNameFromRow(row, i),
-      clipNames: row.clips.map((c) => clipDisplayName(c)),
-    }));
-    const batchState: StitchBatchState = {
-      batchId,
-      createdAt: Date.now(),
-      rows: initialRows,
-      destination: handoffDestination,
+  async function runOneStitchWork(item: StitchWorkItem): Promise<void> {
+    const { uiRowId, batchRowIndex, correlationId, outputFilename, clips, aiInstructions, label } =
+      item;
+    const onProgress = (msg: string) => {
+      patchUiRow(uiRowId, { runProgress: msg });
+      setProgressMsg(`${label}: ${msg}`);
     };
-    writeStitchBatch(batchState);
 
-    const handoffFiles: Array<{
-      blob: Blob;
-      name: string;
-      aiInstructions?: string;
-    }> = [];
-    const failedRows: Array<{ videoNum: number; message: string }> = [];
+    patchUiRow(uiRowId, {
+      runStatus: "running",
+      runProgress: "Starting…",
+      runError: undefined,
+    });
 
-    for (let i = 0; i < nonEmptyRows.length; i++) {
-      const row = nonEmptyRows[i];
-      const rowState = initialRows[i];
-      const label = `Video ${i + 1} of ${nonEmptyRows.length}`;
-      const videoNum = i + 1;
+    try {
+      const name = outputFilename;
+      const notes = aiInstructions.trim() || undefined;
 
-      try {
-        if (rowIsAllDrive(row.clips) && row.clips.length > 1) {
-          patchStitchRow(i, { status: "uploading" });
-          setProgressMsg(
-            `${label}: server pulling ${row.clips.length} clips from Google Drive (no browser download per clip)…`
-          );
-          const { jobId, blob } = await runStitchRowFromDrive(
-            rowDriveIds(row.clips),
-            rowState.correlationId,
-            (msg) => setProgressMsg(`${label}: ${msg}`),
-            (jid) => {
-              patchStitchRow(i, { jobId: jid, status: "processing" });
-            }
-          );
-          patchStitchRow(i, { jobId, status: "completed" });
-          handoffFiles.push({
-            blob,
-            name: rowState.outputFilename,
-            aiInstructions: row.aiInstructions.trim() || undefined,
-          });
-          continue;
-        }
-
-        const resolvedFiles = await resolveClipsToFiles(row.clips, (msg) =>
-          setProgressMsg(`${label}: ${msg}`)
-        );
-
-        if (resolvedFiles.length === 1) {
-          setProgressMsg(`${label}: one clip, skipping stitch…`);
-          const only = resolvedFiles[0]!;
-          handoffFiles.push({
-            blob: only,
-            name: only.name || stitchedNameFromRow(row, i),
-            aiInstructions: row.aiInstructions.trim() || undefined,
-          });
-          patchStitchRow(i, { status: "completed" });
-          continue;
-        }
-
-        patchStitchRow(i, { status: "uploading" });
-        setProgressMsg(`${label}: uploading ${resolvedFiles.length} clips…`);
-
-        const { jobId, blob } = await runStitchRow(
-          resolvedFiles,
-          rowState.correlationId,
-          (msg) => setProgressMsg(`${label}: ${msg}`),
-          (jid) => {
-            patchStitchRow(i, { jobId: jid, status: "processing" });
-          }
-        );
-        patchStitchRow(i, { jobId, status: "completed" });
-
-        handoffFiles.push({
-          blob,
-          name: rowState.outputFilename,
-          aiInstructions: row.aiInstructions.trim() || undefined,
+      if (rowIsAllDrive(clips) && clips.length === 1) {
+        const driveFileId = rowDriveIds(clips)[0]!;
+        onProgress("queueing Drive clip on the server…");
+        patchStitchRow(batchRowIndex, { status: "completed" });
+        await enqueueMultiplierFromStitch({
+          videoLabel: name,
+          driveFileId,
+          aiInstructions: notes,
         });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : "Stitch failed.";
-        patchStitchRow(i, { status: "failed", error: message });
-        failedRows.push({ videoNum, message });
-        setProgressMsg(`${label} failed — continuing with the next video…`);
-      }
-    }
-
-    if (handoffFiles.length === 0) {
-      setStatus("error");
-      if (failedRows.length === 1) {
-        setErrorMsg(failedRows[0]!.message);
-      } else {
-        setErrorMsg(
-          `All ${failedRows.length} videos failed. ${failedRows
-            .map((f) => `Video ${f.videoNum}: ${f.message}`)
-            .join(" ")}`
+      } else if (rowIsAllDrive(clips) && clips.length > 1) {
+        patchStitchRow(batchRowIndex, { status: "uploading" });
+        onProgress(
+          `starting server stitch of ${clips.length} Drive clips (no browser download)…`,
         );
+        const jobId = await stitchJobIdAfterUpload(correlationId, () =>
+          uploadStitchRowFromDrive(rowDriveIds(clips), correlationId),
+        );
+        patchStitchRow(batchRowIndex, {
+          jobId,
+          status: "processing",
+        });
+        onProgress("queueing Multiplier on the server…");
+        await enqueueMultiplierFromStitch({
+          videoLabel: name,
+          stitchJobId: jobId,
+          aiInstructions: notes,
+        });
+      } else {
+        const resolvedFiles = await resolveClipsToFiles(clips, onProgress);
+        if (resolvedFiles.length === 1) {
+          onProgress("one clip, uploading source for background processing…");
+          const only = resolvedFiles[0]!;
+          const label = only.name || outputFilename;
+          const bunnyUrl = await uploadFileToBunnyStorage(only, {
+            filename: `stitch-src/${correlationId}-${label.replace(/[^a-zA-Z0-9._-]/g, "_")}`,
+            contentType: only.type || "video/mp4",
+          });
+          if (!bunnyUrl) {
+            throw new Error(
+              "Could not upload the clip to storage. Check your connection and try again.",
+            );
+          }
+          patchStitchRow(batchRowIndex, { status: "completed" });
+          await enqueueMultiplierFromStitch({
+            videoLabel: label,
+            sourceVideoUrl: bunnyUrl,
+            aiInstructions: notes,
+          });
+        } else {
+          patchStitchRow(batchRowIndex, { status: "uploading" });
+          onProgress(`uploading ${resolvedFiles.length} clips…`);
+          const jobId = await stitchJobIdAfterUpload(correlationId, () =>
+            uploadStitchRow(resolvedFiles, correlationId),
+          );
+          patchStitchRow(batchRowIndex, {
+            jobId,
+            status: "processing",
+          });
+          onProgress("queueing Multiplier on the server…");
+          await enqueueMultiplierFromStitch({
+            videoLabel: name,
+            stitchJobId: jobId,
+            aiInstructions: notes,
+          });
+        }
       }
+
+      incrementClipsStitched();
+      handedOffCountRef.current += 1;
+      setHandedOffCount(handedOffCountRef.current);
+
+      patchUiRow(uiRowId, {
+        runStatus: "done",
+        runProgress: "Sent to Multiplier",
+        clips: [],
+        batchRowIndex: undefined,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Stitch failed.";
+      patchStitchRow(batchRowIndex, { status: "failed", error: message });
+      failedCountRef.current += 1;
+      patchUiRow(uiRowId, {
+        runStatus: "failed",
+        runProgress: undefined,
+        runError: message,
+      });
+    }
+  }
+
+  function drainStitchPool(): void {
+    while (
+      inFlightRef.current < STITCH_CONCURRENCY &&
+      pendingWorkRef.current.length > 0
+    ) {
+      const item = pendingWorkRef.current.shift()!;
+      inFlightRef.current += 1;
+      refreshPoolProgress();
+      void runOneStitchWork(item).finally(() => {
+        inFlightRef.current -= 1;
+        refreshPoolProgress();
+        drainStitchPool();
+      });
+    }
+  }
+
+  function enqueueStitchWork(items: StitchWorkItem[]): void {
+    if (items.length === 0) return;
+    pendingWorkRef.current.push(...items);
+    refreshPoolProgress();
+    drainStitchPool();
+  }
+
+  async function startStitch(): Promise<void> {
+    setErrorMsg("");
+    setRecoveryBanner(null);
+
+    const claimable = rows.filter(
+      (r) =>
+        r.clips.length > 0 &&
+        (r.runStatus === "idle" || r.runStatus === "failed"),
+    );
+    if (claimable.length < 1) {
+      setErrorMsg("Add at least one video with clips first.");
       return;
     }
 
-    setStatus("redirecting");
-    const destLabel =
-      handoffDestination === "video-editor" ? "Video Editor" : "Multiplier";
-    const skippedNote =
-      failedRows.length > 0
-        ? ` Skipped Video${failedRows.length === 1 ? "" : "s"} ${failedRows.map((f) => f.videoNum).join(", ")} (${failedRows.length} failed).`
-        : "";
-    setProgressMsg(
-      `Handing off ${handoffFiles.length} stitched video${handoffFiles.length === 1 ? "" : "s"} to ${destLabel}…${skippedNote}`
-    );
-    await stashStitchedFiles(handoffFiles, handoffDestination);
-    incrementClipsStitched();
-    clearStitchBatch();
-    router.push(
-      handoffDestination === "video-editor"
-        ? "/video-editor?fromStitch=1"
-        : "/multiplier?fromStitch=1"
-    );
+    const existing = readStitchBatch();
+    const startIndex = existing
+      ? Math.max(-1, ...existing.rows.map((r) => r.rowIndex)) + 1
+      : 0;
+
+    const newStates: StitchRowState[] = claimable.map((row, i) => {
+      const batchRowIndex = startIndex + i;
+      return {
+        rowIndex: batchRowIndex,
+        correlationId: generateStitchId(),
+        jobId: null,
+        status: "pending" as const,
+        aiInstructions: row.aiInstructions.trim() || undefined,
+        outputFilename: stitchedNameFromRow(row, batchRowIndex),
+        clipNames: row.clips.map((c) => clipDisplayName(c)),
+      };
+    });
+
+    if (existing) {
+      appendStitchBatchRows(newStates);
+    } else {
+      writeStitchBatch({
+        batchId: generateStitchId(),
+        createdAt: Date.now(),
+        rows: newStates,
+      });
+    }
+
+    // Fresh wave (pool was idle): reset failure counter for this run’s summary.
+    if (inFlightRef.current === 0 && pendingWorkRef.current.length === 0) {
+      failedCountRef.current = 0;
+    }
+
+    const work: StitchWorkItem[] = claimable.map((row, i) => {
+      const state = newStates[i]!;
+      // Snapshot clips — UI may clear/edit other idle rows while this runs.
+      const clipsSnapshot = [...row.clips];
+      patchUiRow(row.id, {
+        runStatus: "queued",
+        runProgress: "Queued…",
+        runError: undefined,
+        batchRowIndex: state.rowIndex,
+      });
+      return {
+        uiRowId: row.id,
+        batchRowIndex: state.rowIndex,
+        correlationId: state.correlationId,
+        outputFilename: state.outputFilename,
+        clips: clipsSnapshot,
+        aiInstructions: row.aiInstructions,
+        label: `Video ${state.rowIndex + 1}`,
+      };
+    });
+
+    setStatus("uploading");
+    enqueueStitchWork(work);
   }
 
   /**
@@ -469,39 +646,35 @@ export default function StitchPage() {
     setErrorMsg("");
     setRecoveryBanner(null);
     setStatus("resuming");
-    const destination: StitchHandoffDestination =
-      batch.destination === "video-editor" ? "video-editor" : handoffDestination;
-    if (destination !== handoffDestination) {
-      setHandoffDestination(destination);
+    handedOffCountRef.current = 0;
+    failedCountRef.current = 0;
+    setHandedOffCount(0);
+
+    const resumable = batch.rows.filter((r) => r.status !== "failed");
+    if (resumable.length === 0) {
+      setStatus("error");
+      setErrorMsg(
+        "Nothing in that batch could be recovered. Re-add your clips and try again.",
+      );
+      return;
     }
 
-    const handoffFiles: Array<{
-      blob: Blob;
-      name: string;
-      aiInstructions?: string;
-    }> = [];
-    const unrecoverable: number[] = [];
+    let unrecoverable = 0;
+    let recovered = 0;
+    let cursor = 0;
 
-    try {
-      for (let i = 0; i < batch.rows.length; i++) {
-        const row = batch.rows[i];
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= resumable.length) return;
+        const row = resumable[idx]!;
         const label = `Video ${row.rowIndex + 1}`;
 
-        if (row.status === "failed") {
-          // Already terminal-failed — don't retry on resume; the user has
-          // to explicitly re-add clips.
-          unrecoverable.push(row.rowIndex);
-          continue;
-        }
-
-        // Resolve a working jobId. Prefer the stored one; fall back to
-        // correlation-id lookup. If both fail, the upload never reached
-        // the server and this row needs manual retry.
         let jobId = row.jobId;
         if (!jobId) {
           setProgressMsg(`${label}: looking up server-side job…`);
           jobId = await recoverStitchJobIdByCorrelationId(
-            row.correlationId
+            row.correlationId,
           ).catch(() => null);
           if (!jobId) {
             patchStitchRow(row.rowIndex, {
@@ -509,76 +682,57 @@ export default function StitchPage() {
               error:
                 "Upload did not reach the server. Re-add this video's clips to retry.",
             });
-            unrecoverable.push(row.rowIndex);
+            unrecoverable += 1;
             continue;
           }
           patchStitchRow(row.rowIndex, { jobId });
         }
 
-        setProgressMsg(`${label}: checking server status…`);
+        setProgressMsg(`${label}: queueing Multiplier on the server…`);
         try {
-          await pollStitchJobUntilDone(jobId, (msg) =>
-            setProgressMsg(`${label}: ${msg}`)
-          );
+          await enqueueMultiplierFromStitch({
+            videoLabel: row.outputFilename,
+            stitchJobId: jobId,
+            aiInstructions: row.aiInstructions,
+          });
         } catch (e) {
           patchStitchRow(row.rowIndex, {
             status: "failed",
-            error:
-              e instanceof Error ? e.message : "Stitch failed on the server.",
+            error: e instanceof Error ? e.message : "Could not queue Multiplier.",
           });
-          unrecoverable.push(row.rowIndex);
-          continue;
-        }
-
-        setProgressMsg(`${label}: downloading stitched video…`);
-        let blob: Blob;
-        try {
-          blob = await downloadStitchOutput(jobId);
-        } catch (e) {
-          patchStitchRow(row.rowIndex, {
-            status: "failed",
-            error: e instanceof Error ? e.message : "Download failed.",
-          });
-          unrecoverable.push(row.rowIndex);
+          unrecoverable += 1;
           continue;
         }
         patchStitchRow(row.rowIndex, { status: "completed" });
-
-        handoffFiles.push({
-          blob,
-          name: row.outputFilename,
-          aiInstructions: row.aiInstructions,
-        });
+        incrementClipsStitched();
+        recovered += 1;
+        handedOffCountRef.current = recovered;
+        setHandedOffCount(recovered);
       }
+    };
 
-      if (handoffFiles.length === 0) {
+    try {
+      const pool = Math.min(STITCH_CONCURRENCY, resumable.length);
+      await Promise.all(Array.from({ length: pool }, () => worker()));
+
+      if (recovered === 0) {
         setStatus("error");
         setErrorMsg(
-          unrecoverable.length === batch.rows.length
+          unrecoverable === batch.rows.length
             ? "Nothing in that batch could be recovered. Re-add your clips and try again."
-            : `Could not recover Videos ${unrecoverable.map((i) => i + 1).join(", ")}. Re-add their clips and try again.`
+            : "Could not recover those videos. Re-add their clips and try again.",
         );
         return;
       }
 
-      setStatus("redirecting");
-      const recoveredCount = handoffFiles.length;
-      const destLabel =
-        destination === "video-editor" ? "Video Editor" : "Multiplier";
+      clearStitchBatch();
+      setStatus("idle");
       const missingNote =
-        unrecoverable.length > 0
-          ? ` (Skipped Videos ${unrecoverable.map((i) => i + 1).join(", ")} — re-add their clips to retry.)`
+        unrecoverable > 0
+          ? ` ${unrecoverable} could not be recovered — re-add those clips.`
           : "";
       setProgressMsg(
-        `Recovered ${recoveredCount} stitched video${recoveredCount === 1 ? "" : "s"}. Handing off to ${destLabel}…${missingNote}`
-      );
-      await stashStitchedFiles(handoffFiles, destination);
-      incrementClipsStitched();
-      clearStitchBatch();
-      router.push(
-        destination === "video-editor"
-          ? "/video-editor?fromStitch=1"
-          : "/multiplier?fromStitch=1"
+        `Recovered ${recovered} stitched video${recovered === 1 ? "" : "s"} → Multiplier.${missingNote}`,
       );
     } catch (e) {
       setStatus("error");
@@ -591,16 +745,18 @@ export default function StitchPage() {
     setRecoveryBanner(null);
   }
 
-  const nonEmptyRows = rows.filter((r) => r.clips.length > 0);
+  const claimableRows = rows.filter(
+    (r) =>
+      r.clips.length > 0 &&
+      (r.runStatus === "idle" || r.runStatus === "failed"),
+  );
   const totalClips = rows.reduce((sum, r) => sum + r.clips.length, 0);
   const totalBytes = rows.reduce(
     (sum, r) => sum + r.clips.reduce((a, c) => a + clipBytesEstimate(c), 0),
-    0
+    0,
   );
-  const busy =
-    status === "uploading" ||
-    status === "redirecting" ||
-    status === "resuming";
+  const poolActive = status === "uploading" || status === "resuming";
+  const resumeBusy = status === "resuming";
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-10 sm:py-14">
@@ -609,8 +765,9 @@ export default function StitchPage() {
           Stitch
         </h1>
         <DismissableHint id="stitch-subtitle">
-          <p className="mt-2 text-sm text-stone-600">
-            Combine clips into one video, then send it to Multiplier or Video Editor.
+          <p className="mt-1 text-sm text-stone-600">
+            Process up to {STITCH_CONCURRENCY} videos at once. Keep adding while
+            others stitch — finished videos go to Multiplier as they complete.
           </p>
         </DismissableHint>
         {driveInboxConfigured === false ? (
@@ -648,7 +805,7 @@ export default function StitchPage() {
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
-              disabled={busy || recoveryBanner.rowsResumable.length === 0}
+              disabled={poolActive || recoveryBanner.rowsResumable.length === 0}
               onClick={() => resumeStitch(recoveryBanner.batch)}
               className="rounded-md bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -656,7 +813,7 @@ export default function StitchPage() {
             </button>
             <button
               type="button"
-              disabled={busy}
+              disabled={poolActive}
               onClick={discardRecovery}
               className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -675,7 +832,10 @@ export default function StitchPage() {
         onChange={(e) => {
           if (e.target.files?.length) {
             const target = pickerRowId ?? rows[0]?.id;
-            if (target) addFilesToRow(target, e.target.files);
+            if (target) {
+              const row = rows.find((r) => r.id === target);
+              if (row && !rowIsLocked(row)) addFilesToRow(target, e.target.files);
+            }
           }
           e.target.value = "";
         }}
@@ -687,22 +847,22 @@ export default function StitchPage() {
             {rows.length} video{rows.length === 1 ? "" : "s"} · {totalClips} clip
             {totalClips === 1 ? "" : "s"} · {formatBytes(totalBytes)}
           </h2>
-          {!busy && (
-            <button
-              type="button"
-              onClick={addRow}
-              className="rounded-md border border-stone-300 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
-            >
-              + Add video
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={addRow}
+            className="rounded-md border border-stone-300 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
+          >
+            + Add video
+          </button>
         </div>
         <div className="space-y-3">
-          {rows.map((row, rowIdx) => (
+          {rows.map((row, rowIdx) => {
+            const locked = rowIsLocked(row);
+            return (
             <section
               key={row.id}
               onDragOver={(e) => {
-                if (busy) return;
+                if (locked) return;
                 e.preventDefault();
                 e.stopPropagation();
                 if (dragOverVideoId !== row.id) setDragOverVideoId(row.id);
@@ -711,7 +871,7 @@ export default function StitchPage() {
                 if (dragOverVideoId === row.id) setDragOverVideoId(null);
               }}
               onDrop={(e) => {
-                if (busy) return;
+                if (locked) return;
                 e.preventDefault();
                 e.stopPropagation();
                 setDragOverVideoId(null);
@@ -722,7 +882,13 @@ export default function StitchPage() {
               className={`rounded-xl border bg-white p-3 shadow-sm transition-colors ${
                 dragOverVideoId === row.id
                   ? "border-palette-teal bg-palette-pale/20"
-                  : "border-stone-200"
+                  : row.runStatus === "done"
+                    ? "border-emerald-200 bg-emerald-50/40"
+                    : row.runStatus === "failed"
+                      ? "border-rose-200"
+                      : locked
+                        ? "border-amber-200 bg-amber-50/30"
+                        : "border-stone-200"
               }`}
             >
               <div className="mb-2 flex items-center justify-between gap-2">
@@ -731,11 +897,31 @@ export default function StitchPage() {
                   <span className="text-xs font-normal text-stone-500">
                     ({row.clips.length} clip{row.clips.length === 1 ? "" : "s"})
                   </span>
+                  {row.runStatus === "queued" ? (
+                    <span className="ml-2 text-xs font-medium text-amber-700">
+                      Queued
+                    </span>
+                  ) : null}
+                  {row.runStatus === "running" ? (
+                    <span className="ml-2 text-xs font-medium text-amber-800">
+                      Stitching…
+                    </span>
+                  ) : null}
+                  {row.runStatus === "done" ? (
+                    <span className="ml-2 text-xs font-medium text-emerald-700">
+                      Sent to Multiplier
+                    </span>
+                  ) : null}
+                  {row.runStatus === "failed" ? (
+                    <span className="ml-2 text-xs font-medium text-rose-700">
+                      Failed
+                    </span>
+                  ) : null}
                 </p>
                 <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={locked}
                     onClick={() => {
                       setPickerRowId(row.id);
                       fileInputRef.current?.click();
@@ -746,7 +932,7 @@ export default function StitchPage() {
                   </button>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={locked}
                     onClick={() => setDriveModalRowId(row.id)}
                     className="rounded border border-palette-teal bg-palette-pale/30 px-2 py-1 text-xs font-medium text-palette-depth hover:bg-palette-pale/50 disabled:opacity-40"
                   >
@@ -754,7 +940,7 @@ export default function StitchPage() {
                   </button>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={locked}
                     onClick={() => toggleRowInstructions(row.id)}
                     className="rounded border border-stone-300 px-2 py-1 text-xs text-stone-700 hover:bg-stone-50 disabled:opacity-40"
                   >
@@ -763,7 +949,7 @@ export default function StitchPage() {
                   <button
                     type="button"
                     aria-label="Move video up"
-                    disabled={busy || rowIdx === 0}
+                    disabled={locked || rowIdx === 0}
                     onClick={() => moveRow(row.id, -1)}
                     className="rounded px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
                   >
@@ -772,7 +958,7 @@ export default function StitchPage() {
                   <button
                     type="button"
                     aria-label="Move video down"
-                    disabled={busy || rowIdx === rows.length - 1}
+                    disabled={locked || rowIdx === rows.length - 1}
                     onClick={() => moveRow(row.id, 1)}
                     className="rounded px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
                   >
@@ -781,7 +967,7 @@ export default function StitchPage() {
                   <button
                     type="button"
                     aria-label="Clear video"
-                    disabled={busy || row.clips.length === 0}
+                    disabled={locked || row.clips.length === 0}
                     onClick={() => clearRow(row.id)}
                     className="rounded px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
                   >
@@ -790,7 +976,7 @@ export default function StitchPage() {
                   <button
                     type="button"
                     aria-label="Remove video"
-                    disabled={busy || rows.length === 1}
+                    disabled={locked || rows.length === 1}
                     onClick={() => removeRow(row.id)}
                     className="rounded px-2 py-1 text-stone-500 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-30"
                   >
@@ -798,8 +984,21 @@ export default function StitchPage() {
                   </button>
                 </div>
               </div>
+              {row.runProgress || row.runError ? (
+                <p
+                  className={`mb-2 text-xs ${
+                    row.runError ? "text-rose-700" : "text-stone-600"
+                  }`}
+                >
+                  {row.runError ?? row.runProgress}
+                </p>
+              ) : null}
               {row.clips.length === 0 ? (
-                <p className="text-xs text-stone-500">No clips in this video yet.</p>
+                <p className="text-xs text-stone-500">
+                  {row.runStatus === "done"
+                    ? "Clips cleared after handoff — add more anytime."
+                    : "No clips in this video yet."}
+                </p>
               ) : (
                 <ol className="space-y-2">
                   {row.clips.map((c, idx) => (
@@ -820,7 +1019,7 @@ export default function StitchPage() {
                         <button
                           type="button"
                           aria-label="Move clip up"
-                          disabled={busy || idx === 0}
+                          disabled={locked || idx === 0}
                           onClick={() => moveClip(row.id, c.id, -1)}
                           className="rounded px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
                         >
@@ -829,7 +1028,7 @@ export default function StitchPage() {
                         <button
                           type="button"
                           aria-label="Move clip down"
-                          disabled={busy || idx === row.clips.length - 1}
+                          disabled={locked || idx === row.clips.length - 1}
                           onClick={() => moveClip(row.id, c.id, 1)}
                           className="rounded px-2 py-1 text-stone-500 hover:bg-stone-100 disabled:opacity-30"
                         >
@@ -838,7 +1037,7 @@ export default function StitchPage() {
                         <button
                           type="button"
                           aria-label="Remove clip"
-                          disabled={busy}
+                          disabled={locked}
                           onClick={() => removeClip(row.id, c.id)}
                           className="rounded px-2 py-1 text-stone-500 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-30"
                         >
@@ -858,7 +1057,7 @@ export default function StitchPage() {
                     rows={3}
                     maxLength={MAX_CAROUSEL_FOCUS_CHARS}
                     value={row.aiInstructions}
-                    disabled={busy}
+                    disabled={locked}
                     onChange={(e) => setRowInstructions(row.id, e.target.value)}
                     placeholder="Only for this video: hook angle, what to trim/keep, tone, CTA, etc."
                     className="mt-1.5 w-full resize-y rounded-md border border-stone-200 bg-white px-2 py-1.5 text-sm text-stone-900 placeholder:text-stone-400 focus:border-palette-teal focus:outline-none focus:ring-1 focus:ring-palette-teal disabled:bg-stone-100"
@@ -869,71 +1068,36 @@ export default function StitchPage() {
                 </div>
               ) : null}
             </section>
-          ))}
+            );
+          })}
         </div>
       </section>
 
-      <section className="space-y-3">
-        <fieldset disabled={busy} className="space-y-2">
-          <legend className="text-sm font-semibold text-stone-800">
-            After stitching, send to
-          </legend>
-          <div className="flex flex-wrap gap-2">
-            <label
-              className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
-                handoffDestination === "multiplier"
-                  ? "border-palette-teal bg-palette-pale/30 text-stone-900"
-                  : "border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
-              }`}
-            >
-              <input
-                type="radio"
-                name="stitch-handoff"
-                className="sr-only"
-                checked={handoffDestination === "multiplier"}
-                onChange={() => updateHandoffDestination("multiplier")}
-              />
-              Multiplier (all formats)
-            </label>
-            <label
-              className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
-                handoffDestination === "video-editor"
-                  ? "border-palette-teal bg-palette-pale/30 text-stone-900"
-                  : "border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
-              }`}
-            >
-              <input
-                type="radio"
-                name="stitch-handoff"
-                className="sr-only"
-                checked={handoffDestination === "video-editor"}
-                onChange={() => updateHandoffDestination("video-editor")}
-              />
-              Video Editor (short only)
-            </label>
-          </div>
-        </fieldset>
-        <div className="flex flex-wrap items-center gap-3">
+      <section className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={startStitch}
+          disabled={resumeBusy || claimableRows.length < 1}
+          className="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {resumeBusy
+            ? "Resuming…"
+            : poolActive
+              ? `Process ${claimableRows.length} more → Multiplier`
+              : `Process ${claimableRows.length} video${claimableRows.length === 1 ? "" : "s"} → Multiplier`}
+        </button>
+        {handedOffCount > 0 ? (
           <button
             type="button"
-            onClick={startStitch}
-            disabled={busy || nonEmptyRows.length < 1}
-            className="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => router.push("/multiplier?fromStitch=1")}
+            className="rounded-lg border border-emerald-700 bg-white px-5 py-2.5 text-sm font-semibold text-emerald-800 shadow-sm hover:bg-emerald-50"
           >
-            {status === "resuming"
-              ? "Resuming…"
-              : busy
-                ? "Working…"
-                : `Process ${nonEmptyRows.length} video${nonEmptyRows.length === 1 ? "" : "s"} → ${
-                    handoffDestination === "video-editor"
-                      ? "Video Editor"
-                      : "Multiplier"
-                  }`}
+            Open Multiplier ({handedOffCount} ready)
           </button>
-        </div>
+        ) : null}
       </section>
 
-      {(busy || progressMsg || errorMsg) && (
+      {(poolActive || progressMsg || errorMsg) && (
         <section
           className={`rounded-lg border px-4 py-3 text-sm ${
             errorMsg
@@ -947,7 +1111,7 @@ export default function StitchPage() {
             </p>
           ) : (
             <p>
-              {busy && (
+              {poolActive && (
                 <span className="mr-2 inline-block animate-pulse">●</span>
               )}
               {progressMsg}
@@ -959,9 +1123,20 @@ export default function StitchPage() {
       <DriveClipPickerModal
         open={driveModalRowId !== null}
         onClose={() => setDriveModalRowId(null)}
-        disabled={busy}
+        disabled={
+          !!driveModalRowId &&
+          rowIsLocked(rows.find((r) => r.id === driveModalRowId) ?? {
+            id: "",
+            clips: [],
+            aiInstructions: "",
+            showAiInstructions: false,
+            runStatus: "idle",
+          })
+        }
         onAddClips={(picks) => {
           if (!driveModalRowId) return false;
+          const row = rows.find((r) => r.id === driveModalRowId);
+          if (row && rowIsLocked(row)) return false;
           return addDriveClipsToRow(driveModalRowId, picks);
         }}
       />

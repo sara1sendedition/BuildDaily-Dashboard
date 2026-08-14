@@ -1,12 +1,14 @@
 "use client";
 
 import { clientApiPath } from "@/lib/client-api-path";
+import { sanitizeQueueErrorMessage } from "@/lib/multiplier-queue/merge-hub-payload";
 
 export type CreateMultiplierProcessingJobInput = {
   queueItemId: string;
   videoLabel: string;
   sourceVideoUrl?: string;
   driveFileId?: string;
+  stitchJobId?: string;
   aiInstructions?: string;
   outputsWanted: {
     carousel: boolean;
@@ -34,9 +36,13 @@ async function parseProblem(res: Response): Promise<string> {
       detail?: string;
       title?: string;
     };
-    return j.error ?? j.detail ?? j.title ?? `Server returned ${res.status}.`;
+    return sanitizeQueueErrorMessage(
+      j.error ?? j.detail ?? j.title ?? `Server returned ${res.status}.`,
+    );
   } catch {
-    return `Server returned ${res.status}: ${text.slice(0, 200)}`;
+    return sanitizeQueueErrorMessage(
+      `Server returned ${res.status}: ${text.slice(0, 200)}`,
+    );
   }
 }
 
@@ -87,6 +93,41 @@ export async function createMultiplierProcessingJob(
       message: "Server returned invalid JSON.",
     };
   }
+}
+
+/**
+ * Create a Hub queue row + ProcessingJob from a server-side source
+ * (Drive id, stitch job, or Bunny URL). Used by Stitch so the laptop
+ * can close after enqueue — the Hub cron worker does the rest.
+ */
+export async function enqueueServerMultiplierJob(input: {
+  videoLabel: string;
+  queueItemId?: string;
+  sourceVideoUrl?: string;
+  driveFileId?: string;
+  stitchJobId?: string;
+  aiInstructions?: string;
+  outputsWanted?: CreateMultiplierProcessingJobInput["outputsWanted"];
+  studioSettings?: CreateMultiplierProcessingJobInput["studioSettings"];
+}): Promise<CreateMultiplierProcessingJobResult> {
+  const created = await createMultiplierProcessingJob({
+    queueItemId: input.queueItemId?.trim() || crypto.randomUUID(),
+    videoLabel: input.videoLabel.trim() || "video.mp4",
+    ...(input.sourceVideoUrl ? { sourceVideoUrl: input.sourceVideoUrl } : {}),
+    ...(input.driveFileId ? { driveFileId: input.driveFileId } : {}),
+    ...(input.stitchJobId ? { stitchJobId: input.stitchJobId } : {}),
+    ...(input.aiInstructions ? { aiInstructions: input.aiInstructions } : {}),
+    outputsWanted: input.outputsWanted ?? {
+      carousel: true,
+      photo: true,
+      short: true,
+    },
+    ...(input.studioSettings ? { studioSettings: input.studioSettings } : {}),
+  });
+  if (created.ok) {
+    void kickMultiplierProcessingDue();
+  }
+  return created;
 }
 
 /** Kick server processing for the signed-in user's pending jobs. */

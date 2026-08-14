@@ -22,6 +22,7 @@ export async function findActiveMultiplierJob(opts: {
   queueItemId: string;
   sourceVideoUrl?: string;
   driveFileId?: string;
+  stitchJobId?: string;
   db?: JobReader;
 }): Promise<ActiveMultiplierJob | null> {
   const db = opts.db ?? prisma;
@@ -30,11 +31,15 @@ export async function findActiveMultiplierJob(opts: {
   }> = [{ payload: { path: ["queueItemId"], equals: opts.queueItemId } }];
   const sourceVideoUrl = opts.sourceVideoUrl?.trim() ?? "";
   const driveFileId = opts.driveFileId?.trim() ?? "";
+  const stitchJobId = opts.stitchJobId?.trim() ?? "";
   if (sourceVideoUrl) {
     or.push({ payload: { path: ["sourceVideoUrl"], equals: sourceVideoUrl } });
   }
   if (driveFileId) {
     or.push({ payload: { path: ["driveFileId"], equals: driveFileId } });
+  }
+  if (stitchJobId) {
+    or.push({ payload: { path: ["stitchJobId"], equals: stitchJobId } });
   }
 
   return db.processingJob.findFirst({
