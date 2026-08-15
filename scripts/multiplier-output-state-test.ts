@@ -29,6 +29,16 @@ function main() {
   assert.equal(outputReadyToSchedule(merged, "carousel"), true);
   assert.equal(outputReadyToSchedule(merged, "photo"), false);
 
+  const pollClobber = mergeOutputsState(merged, {
+    carousel: { status: "done", readyToSchedule: false, progress: undefined },
+  });
+  assert.equal(pollClobber.carousel?.readyToSchedule, true);
+
+  const userUnmark = mergeOutputsState(merged, {
+    carousel: { readyToSchedule: false },
+  });
+  assert.equal(userUnmark.carousel?.readyToSchedule, false);
+
   assert.equal(
     localQueueStatusFromHub({
       hubStatus: "failed",

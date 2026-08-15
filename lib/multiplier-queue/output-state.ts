@@ -32,10 +32,15 @@ export const MULTIPLIER_OUTPUT_KEYS: MultiplierOutputKey[] = [
   "short",
 ];
 
+export type MultiplierOutputPatch = Partial<MultiplierOutputState>;
+export type MultiplierOutputsPatch = Partial<
+  Record<MultiplierOutputKey, MultiplierOutputPatch>
+>;
+
 export function emptyOutputState(
   status: OutputProcessStatus = "pending",
 ): MultiplierOutputState {
-  return { status, attempts: 0, readyToSchedule: false };
+  return { status, attempts: 0 };
 }
 
 export function buildInitialOutputs(wanted: {
@@ -53,16 +58,37 @@ export function buildInitialOutputs(wanted: {
   return out;
 }
 
+/** True when a patch is a worker/progress snapshot, not a user Ready toggle. */
+function outputPatchLooksLikeProgress(incoming: MultiplierOutputPatch): boolean {
+  return (
+    incoming.status !== undefined ||
+    incoming.progress !== undefined ||
+    incoming.error !== undefined ||
+    incoming.attempts !== undefined
+  );
+}
+
 export function mergeOutputsState(
   current: MultiplierOutputsState | undefined,
-  patch: MultiplierOutputsState | undefined,
+  patch: MultiplierOutputsPatch | undefined,
 ): MultiplierOutputsState {
   const base: MultiplierOutputsState = { ...(current ?? {}) };
   if (!patch) return base;
   for (const key of MULTIPLIER_OUTPUT_KEYS) {
     const incoming = patch[key];
     if (!incoming) continue;
-    base[key] = { ...(base[key] ?? emptyOutputState()), ...incoming };
+    const prev = base[key] ?? emptyOutputState();
+    const merged: MultiplierOutputState = { ...prev, ...incoming };
+    // User "Mark ready" must survive Hub polls / worker snapshots that still
+    // carry readyToSchedule: false from the original job payload.
+    if (
+      prev.readyToSchedule === true &&
+      incoming.readyToSchedule === false &&
+      outputPatchLooksLikeProgress(incoming)
+    ) {
+      merged.readyToSchedule = true;
+    }
+    base[key] = merged;
   }
   return base;
 }
