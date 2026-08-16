@@ -22,7 +22,8 @@
     "test:default-caption-cta-append": "npx tsx scripts/default-caption-cta-append-test.ts",
     "test:merge-short-editorial-brief": "npx tsx scripts/merge-short-editorial-brief-test.ts",
     "test:load-carousel-request": "npx tsx scripts/load-carousel-request-test.ts",
-    "test:bunny-upload-server": "npx tsx scripts/bunny-upload-server-test.ts"
+    "test:bunny-upload-server": "npx tsx scripts/bunny-upload-server-test.ts",
+    "test:stitch-group-plan": "npx tsx scripts/stitch-group-plan-test.ts"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.3.3",

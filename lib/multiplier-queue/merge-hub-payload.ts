@@ -36,6 +36,7 @@ export function mergeHubQueuePayload(
     "stitchJobId",
     "shortOutputRevision",
     "error",
+    "studioOutputs",
   ]);
 
   for (const [k, v] of Object.entries(incoming)) {
@@ -87,6 +88,7 @@ export function mergeHubQueuePayload(
     "stitchJobId",
     "shortOutputRevision",
     "error",
+    "studioOutputs",
   ] as const) {
     if (
       !(key in incoming) &&

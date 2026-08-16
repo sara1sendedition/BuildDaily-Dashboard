@@ -59,6 +59,27 @@ export function buildInitialOutputs(wanted: {
   return out;
 }
 
+/** Turn previously skipped outputs on when a later enqueue requests them. */
+export function enableNewlyWantedOutputs(
+  current: MultiplierOutputsState | undefined,
+  wanted: { carousel: boolean; photo: boolean; short: boolean },
+): MultiplierOutputsState {
+  const next: MultiplierOutputsState = { ...(current ?? {}) };
+  const keys = [
+    ["carousel", wanted.carousel],
+    ["photo", wanted.photo],
+    ["short", wanted.short],
+  ] as const;
+  for (const [key, on] of keys) {
+    if (!on) continue;
+    const prev = next[key];
+    if (!prev || prev.status === "skipped") {
+      next[key] = emptyOutputState("queued");
+    }
+  }
+  return next;
+}
+
 /** True when a patch is a worker/progress snapshot, not a user Ready toggle. */
 function outputPatchLooksLikeProgress(incoming: MultiplierOutputPatch): boolean {
   return (
@@ -79,6 +100,15 @@ export function mergeOutputsState(
     const incoming = patch[key];
     if (!incoming) continue;
     const prev = base[key] ?? emptyOutputState();
+    // A later enqueue can un-skip an output (queued) while a worker still
+    // holds an in-memory snapshot that says skipped — never clobber that.
+    if (
+      incoming.status === "skipped" &&
+      prev.status &&
+      prev.status !== "skipped"
+    ) {
+      continue;
+    }
     const merged: MultiplierOutputState = { ...prev, ...incoming };
     // User "Mark ready" must survive Hub polls / worker snapshots that still
     // carry readyToSchedule: false from the original job payload.

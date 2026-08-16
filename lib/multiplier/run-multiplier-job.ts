@@ -348,6 +348,42 @@ function withOutput(
   return { [key]: state };
 }
 
+async function latestWantedOutputsStillQueued(opts: {
+  jobId: string;
+  queueItemId: string;
+  userId: string;
+}): Promise<boolean> {
+  const job = await prisma.processingJob.findUnique({
+    where: { id: opts.jobId },
+    select: { payload: true },
+  });
+  const parsed = parseMultiplierJobPayload(job?.payload);
+  if (!parsed) return false;
+  const row = await prisma.multiplierQueueItem.findFirst({
+    where: { id: opts.queueItemId, userId: opts.userId },
+    select: { payload: true },
+  });
+  const payload =
+    row?.payload && typeof row.payload === "object"
+      ? (row.payload as Record<string, unknown>)
+      : {};
+  const outputs =
+    payload.outputs && typeof payload.outputs === "object"
+      ? (payload.outputs as MultiplierOutputsState)
+      : {};
+  const wanted = parsed.outputsWanted;
+  const checks = [
+    [wanted.carousel, outputs.carousel?.status],
+    [wanted.photo, outputs.photo?.status],
+    [wanted.short, outputs.short?.status],
+  ] as const;
+  return checks.some(
+    ([on, status]) =>
+      on &&
+      (status === "queued" || status === "pending" || status === "processing"),
+  );
+}
+
 /**
  * Process one claimed Multiplier ProcessingJob end-to-end:
  * ingest → carousel/image → Bunny upload → kick/await Short.
@@ -359,8 +395,7 @@ export async function runMultiplierProcessingJob(opts: {
   attempts: number;
   leaseOwner?: string;
 }): Promise<
-  | { ok: true; shortPending?: false }
-  | { ok: true; shortPending: true }
+  | { ok: true; shortPending?: boolean; moreOutputsPending?: boolean }
   | { ok: false; error: string }
 > {
   const parsed = parseMultiplierJobPayload(opts.payload);
@@ -870,6 +905,17 @@ export async function runMultiplierProcessingJob(opts: {
     if (wanted.short && outputs.short?.status === "processing") {
       // Do not mark ProcessingJob done — re-queue awaiting Short finalize.
       return { ok: true, shortPending: true };
+    }
+    if (
+      await latestWantedOutputsStillQueued({
+        jobId: opts.jobId,
+        queueItemId: parsed.queueItemId,
+        userId: opts.userId,
+      })
+    ) {
+      // A later enqueue widened outputsWanted (e.g. short-only → carousel)
+      // while this run was in flight. Re-queue so a new claim picks them up.
+      return { ok: true, moreOutputsPending: true };
     }
     return { ok: true };
   } catch (e) {

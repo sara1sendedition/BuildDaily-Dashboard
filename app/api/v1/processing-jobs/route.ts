@@ -11,10 +11,20 @@ import {
   DEFAULT_MULTIPLIER_MAX_ATTEMPTS,
   MULTIPLIER_JOB_TYPE,
   parseMultiplierJobPayload,
+  unionOutputsWanted,
 } from "@/lib/multiplier/process-job-types";
 import { findActiveMultiplierJob } from "@/lib/multiplier/find-active-job";
 import { mergeQueuePayloadForJob } from "@/lib/multiplier-queue/merge-hub-payload";
-import { buildInitialOutputs } from "@/lib/multiplier-queue/output-state";
+import {
+  buildInitialOutputs,
+  enableNewlyWantedOutputs,
+  type MultiplierOutputsState,
+} from "@/lib/multiplier-queue/output-state";
+import {
+  parseStudioOutputs,
+  studioOutputsFromWanted,
+  unionStudioOutputs,
+} from "@/lib/studio-output-flags";
 import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
@@ -100,6 +110,7 @@ export const POST = withUser(async ({ req, user }) => {
   const queueIncoming: Record<string, unknown> = {
     v: 1,
     outputs,
+    studioOutputs: studioOutputsFromWanted(outputsWanted),
     ...(sourceVideoUrl ? { bunnyUrls: { sourceVideoUrl } } : {}),
     ...(driveFileId ? { driveFileId } : {}),
     ...(stitchJobId ? { stitchJobId } : {}),
@@ -142,30 +153,49 @@ export const POST = withUser(async ({ req, user }) => {
 
     if (active) {
       const existingParsed = parseMultiplierJobPayload(active.payload);
-      if (
-        existingParsed &&
-        existingParsed.queueItemId &&
-        existingParsed.queueItemId !== queueItemId
-      ) {
-        const nextPayload = {
-          ...(typeof active.payload === "object" && active.payload
-            ? (active.payload as Record<string, unknown>)
-            : {}),
-          queueItemId,
-          videoLabel,
-        };
-        await tx.processingJob.update({
-          where: { id: active.id },
-          data: { payload: nextPayload as Prisma.InputJsonValue },
-        });
-      }
+      const nextWanted = unionOutputsWanted(
+        existingParsed?.outputsWanted,
+        outputsWanted,
+      );
+      const priorOutputs =
+        existingParsed?.outputs && typeof existingParsed.outputs === "object"
+          ? existingParsed.outputs
+          : priorPayload.outputs && typeof priorPayload.outputs === "object"
+            ? (priorPayload.outputs as MultiplierOutputsState)
+            : undefined;
+      const nextOutputs = enableNewlyWantedOutputs(priorOutputs, nextWanted);
+      const nextStudio = unionStudioOutputs(
+        parseStudioOutputs(priorPayload.studioOutputs),
+        studioOutputsFromWanted(nextWanted),
+      );
+      const basePayload =
+        typeof active.payload === "object" && active.payload
+          ? (active.payload as Record<string, unknown>)
+          : {};
+      const nextPayload = {
+        ...basePayload,
+        queueItemId,
+        videoLabel,
+        outputsWanted: nextWanted,
+        outputs: nextOutputs,
+      };
+      await tx.processingJob.update({
+        where: { id: active.id },
+        data: { payload: nextPayload as Prisma.InputJsonValue },
+      });
 
       const mergedQueuePayload = mergeQueuePayloadForJob(
         priorPayload,
-        queueIncoming,
+        {
+          ...queueIncoming,
+          studioOutputs: nextStudio,
+          outputs: nextOutputs,
+        },
         active.id,
         { preserveOutputs: true },
       );
+      mergedQueuePayload.outputs = nextOutputs;
+      mergedQueuePayload.studioOutputs = nextStudio;
       await tx.multiplierQueueItem.upsert({
         where: { id: queueItemId },
         create: {

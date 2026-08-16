@@ -45,6 +45,16 @@ export function runClaimedMultiplierJobsInBackground(
             });
             return;
           }
+          if (ran.ok && ran.moreOutputsPending) {
+            await markProcessingJobAwaitingShort({
+              id: job.id,
+              leaseOwner: job.leaseOwner,
+              attempts: job.attempts,
+              maxAttempts: job.maxAttempts,
+              error: "Awaiting remaining outputs…",
+            });
+            return;
+          }
           if (ran.ok) {
             await markProcessingJobDone({
               id: job.id,

@@ -3,12 +3,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { clientApiPath } from "@/lib/client-api-path";
 import type { DriveInboxFile } from "@/app/components/DriveInboxPanel";
+import { MAX_STITCH_AUTO_GROUP_FILES } from "@/lib/stitch-group-plan";
 
 type Props = {
   open: boolean;
   onClose: () => void;
   /** Selected inbox videos in checkbox order (not downloaded until Process). */
-  onAddClips: (files: DriveInboxFile[]) => boolean;
+  onAddClips?: (files: DriveInboxFile[]) => boolean;
+  /**
+   * When set, the picker can transcribe the selection and fill stitch rows
+   * (stitch vs solo) instead of appending to a single row.
+   */
+  onAutoGroup?: (files: DriveInboxFile[]) => void;
+  variant?: "queue" | "auto-group";
   disabled?: boolean;
 };
 
@@ -71,8 +78,11 @@ export function DriveClipPickerModal({
   open,
   onClose,
   onAddClips,
+  onAutoGroup,
+  variant = "queue",
   disabled,
 }: Props) {
+  const autoGroupMode = variant === "auto-group";
   const [mode, setMode] = useState<PanelMode>("loading");
   const [files, setFiles] = useState<DriveInboxFile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -170,20 +180,41 @@ export function DriveClipPickerModal({
     );
   };
 
-  const addSelectedClips = () => {
+  const pickedInOrder = (): DriveInboxFile[] | null => {
     if (selectedIds.length < 1) {
       setError("Select at least one video");
-      return;
+      return null;
     }
-    setError(null);
     const picked = selectedIds
       .map((id) => files.find((f) => f.id === id))
       .filter((f): f is DriveInboxFile => Boolean(f));
     if (picked.length !== selectedIds.length) {
-      setError("Some selected videos are no longer in the inbox. Refresh and try again.");
+      setError(
+        "Some selected videos are no longer in the inbox. Refresh and try again."
+      );
+      return null;
+    }
+    setError(null);
+    return picked;
+  };
+
+  const addSelectedClips = () => {
+    const picked = pickedInOrder();
+    if (!picked || !onAddClips) return;
+    if (onAddClips(picked)) onClose();
+  };
+
+  const autoGroupSelected = () => {
+    const picked = pickedInOrder();
+    if (!picked || !onAutoGroup) return;
+    if (picked.length > MAX_STITCH_AUTO_GROUP_FILES) {
+      setError(
+        `Auto-group supports up to ${MAX_STITCH_AUTO_GROUP_FILES} videos. Deselect some first.`
+      );
       return;
     }
-    if (onAddClips(picked)) onClose();
+    onAutoGroup(picked);
+    onClose();
   };
 
   if (!open) return null;
@@ -207,7 +238,7 @@ export function DriveClipPickerModal({
             id="drive-clip-picker-title"
             className="text-base font-semibold text-stone-900"
           >
-            Google Drive
+            {autoGroupMode ? "Auto-group from Google Drive" : "Google Drive"}
           </h2>
           <button
             type="button"
@@ -220,20 +251,47 @@ export function DriveClipPickerModal({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           <p className="rounded-lg border border-palette-teal/40 bg-palette-pale/25 px-3 py-2 text-xs text-stone-800">
-            <strong>No download happens here.</strong> Selected videos are only
-            queued on the Stitch page. They download when you click{" "}
-            <strong>Process … → home</strong> at the bottom of that page.
+            {autoGroupMode ? (
+              <>
+                <strong>Transcripts stay on the server.</strong> Select the
+                batch (Select all is fine). They are transcribed, then grouped
+                into stitch vs solo rows. Idle rows on this page are replaced.
+                Up to {MAX_STITCH_AUTO_GROUP_FILES} videos per run.
+              </>
+            ) : (
+              <>
+                <strong>No download happens here.</strong> Selected videos are
+                only queued on the Stitch page. They download when you click{" "}
+                <strong>Process … → home</strong> at the bottom of that page.
+              </>
+            )}
           </p>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <button
-              type="button"
-              onClick={() => void loadInbox()}
-              disabled={loading || disabled}
-              className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void loadInbox()}
+                disabled={loading || disabled}
+                className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+              >
+                {loading ? "Refreshing…" : "Refresh"}
+              </button>
+              {mode === "ready" && files.length > 0 ? (
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() =>
+                    setSelectedIds((prev) =>
+                      prev.length === files.length ? [] : files.map((f) => f.id)
+                    )
+                  }
+                  className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+                >
+                  {selectedIds.length === files.length ? "Clear all" : "Select all"}
+                </button>
+              ) : null}
+            </div>
             {selectedIds.length > 0 ? (
               <span className="text-xs text-stone-600">
                 {selectedIds.length} selected
@@ -326,12 +384,16 @@ export function DriveClipPickerModal({
           <button
             type="button"
             disabled={disabled || mode !== "ready" || selectedIds.length < 1}
-            onClick={addSelectedClips}
+            onClick={autoGroupMode ? autoGroupSelected : addSelectedClips}
             className="rounded-lg bg-palette-moss px-4 py-1.5 text-xs font-semibold text-white hover:bg-palette-depth disabled:opacity-50"
           >
-            {selectedIds.length < 1
-              ? "Queue clips"
-              : `Queue ${selectedIds.length} clip${selectedIds.length === 1 ? "" : "s"}`}
+            {autoGroupMode
+              ? selectedIds.length < 1
+                ? "Transcribe & group"
+                : `Transcribe & group ${selectedIds.length}`
+              : selectedIds.length < 1
+                ? "Queue clips"
+                : `Queue ${selectedIds.length} clip${selectedIds.length === 1 ? "" : "s"}`}
           </button>
         </div>
       </div>

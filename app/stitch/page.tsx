@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { DriveClipPickerModal } from "@/app/components/DriveClipPickerModal";
 import { DismissableHint } from "@/app/components/DismissableHint";
 import type { DriveInboxFile } from "@/app/components/DriveInboxPanel";
 import { MAX_CAROUSEL_FOCUS_CHARS } from "@/lib/carousel-focus";
+import { clientApiPath } from "@/lib/client-api-path";
 import { fetchDriveInboxConfigured } from "@/lib/drive-inbox-available";
 import {
   clipBytesEstimate,
@@ -19,6 +20,8 @@ import {
 } from "@/lib/stitch-clips";
 import { incrementClipsStitched } from "@/lib/hub/metrics-store";
 import { enqueueServerMultiplierJob } from "@/lib/multiplier-queue/processing-jobs-client";
+import { autoGroupDriveClips } from "@/lib/run-stitch-auto-group";
+import { setShortSourceTool } from "@/lib/short-source-tool";
 import {
   recoverStitchJobIdByCorrelationId,
   uploadStitchRow,
@@ -47,7 +50,10 @@ async function enqueueMultiplierFromStitch(opts: {
   driveFileId?: string;
   sourceVideoUrl?: string;
   aiInstructions?: string;
+  outputsWanted?: { carousel: boolean; photo: boolean; short: boolean };
+  destLabel?: string;
 }): Promise<void> {
+  const destLabel = opts.destLabel ?? "Multiplier";
   const created = await enqueueServerMultiplierJob({
     videoLabel: opts.videoLabel,
     ...(opts.stitchJobId ? { stitchJobId: opts.stitchJobId } : {}),
@@ -56,10 +62,11 @@ async function enqueueMultiplierFromStitch(opts: {
     ...(opts.aiInstructions?.trim()
       ? { aiInstructions: opts.aiInstructions.trim() }
       : {}),
+    ...(opts.outputsWanted ? { outputsWanted: opts.outputsWanted } : {}),
   });
   if (!created.ok) {
     throw new Error(
-      created.message || "Could not queue Multiplier on the server.",
+      created.message || `Could not queue ${destLabel} on the server.`,
     );
   }
 }
@@ -86,6 +93,12 @@ async function stitchJobIdAfterUpload(
  * after enqueue; the stitched MP4 is never downloaded into this browser.
  */
 
+const SHORT_ONLY_OUTPUTS_WANTED = {
+  carousel: false,
+  photo: false,
+  short: true,
+} as const;
+
 type RowRunStatus = "idle" | "queued" | "running" | "done" | "failed";
 
 type StitchRow = {
@@ -96,6 +109,8 @@ type StitchRow = {
   runStatus: RowRunStatus;
   runProgress?: string;
   runError?: string;
+  /** Why auto-group put these clips on this row (stitch vs solo). */
+  groupReason?: string;
   /** Index into ``stitch:batchState`` while this row is in a Process run. */
   batchRowIndex?: number;
 };
@@ -143,17 +158,56 @@ function safeRandomId(): string {
   return `clip-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
+function emptyStitchRow(): StitchRow {
+  return {
+    id: safeRandomId(),
+    clips: [],
+    aiInstructions: "",
+    showAiInstructions: false,
+    runStatus: "idle",
+  };
+}
+
 export default function StitchPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-10 sm:py-14">
+          <h1 className="text-3xl font-semibold tracking-tight text-stone-900">
+            Stitch
+          </h1>
+          <p className="text-sm text-stone-600">Loading…</p>
+        </main>
+      }
+    >
+      <StitchPageContent />
+    </Suspense>
+  );
+}
+
+function StitchPageContent() {
   const router = useRouter();
-  const [rows, setRows] = useState<StitchRow[]>([
-    {
-      id: safeRandomId(),
-      clips: [],
-      aiInstructions: "",
-      showAiInstructions: false,
-      runStatus: "idle",
-    },
-  ]);
+  const searchParams = useSearchParams();
+  const toEditor = searchParams.get("to") === "editor";
+  const destLabel = toEditor ? "Video Editor" : "Multiplier";
+  const destPath = toEditor
+    ? "/video-editor?fromStitch=1"
+    : "/multiplier?fromStitch=1";
+
+  function enqueueHandoff(
+    opts: Parameters<typeof enqueueMultiplierFromStitch>[0],
+  ): Promise<void> {
+    setShortSourceTool(toEditor ? "video-editor" : "multiplier");
+    return enqueueMultiplierFromStitch({
+      ...opts,
+      destLabel,
+      ...(toEditor ? { outputsWanted: SHORT_ONLY_OUTPUTS_WANTED } : {}),
+    });
+  }
+  const [rows, setRows] = useState<StitchRow[]>([emptyStitchRow()]);
+  const [autoGroupPickerOpen, setAutoGroupPickerOpen] = useState(false);
+  const [autoGrouping, setAutoGrouping] = useState(false);
+  const [processAfterGroup, setProcessAfterGroup] = useState(true);
   const [status, setStatus] = useState<Status>("idle");
   const [progressMsg, setProgressMsg] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
@@ -164,6 +218,7 @@ export default function StitchPage() {
   const [driveInboxConfigured, setDriveInboxConfigured] = useState<boolean | null>(
     null,
   );
+  const [autoGroupAllowed, setAutoGroupAllowed] = useState(false);
   const [dragOverVideoId, setDragOverVideoId] = useState<string | null>(null);
   const [recoveryBanner, setRecoveryBanner] =
     useState<RecoveryBannerState | null>(null);
@@ -172,6 +227,8 @@ export default function StitchPage() {
   const inFlightRef = useRef(0);
   const handedOffCountRef = useRef(0);
   const failedCountRef = useRef(0);
+  const rowsRef = useRef<StitchRow[]>([]);
+  rowsRef.current = rows;
 
   // On mount, check whether a previous stitch batch left in-flight work in
   // localStorage. We only show the recovery banner when at least one row
@@ -203,6 +260,16 @@ export default function StitchPage() {
     void fetchDriveInboxConfigured().then((configured) => {
       if (!cancelled) setDriveInboxConfigured(configured);
     });
+    void fetch(clientApiPath("/api/stitch/auto-group-access"), {
+      cache: "no-store",
+    })
+      .then((r) => r.json() as Promise<{ allowed?: boolean }>)
+      .then((data) => {
+        if (!cancelled) setAutoGroupAllowed(Boolean(data.allowed));
+      })
+      .catch(() => {
+        if (!cancelled) setAutoGroupAllowed(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -267,33 +334,14 @@ export default function StitchPage() {
   }
 
   function addRow(): void {
-    setRows((prev) => [
-      ...prev,
-      {
-        id: safeRandomId(),
-        clips: [],
-        aiInstructions: "",
-        showAiInstructions: false,
-        runStatus: "idle",
-      },
-    ]);
+    setRows((prev) => [...prev, emptyStitchRow()]);
   }
 
   function removeRow(rowId: string): void {
     setDriveModalRowId((id) => (id === rowId ? null : id));
     setRows((prev) => {
       const next = prev.filter((r) => r.id !== rowId);
-      return next.length > 0
-        ? next
-        : [
-            {
-              id: safeRandomId(),
-              clips: [],
-              aiInstructions: "",
-              showAiInstructions: false,
-              runStatus: "idle",
-            },
-          ];
+      return next.length > 0 ? next : [emptyStitchRow()];
     });
   }
 
@@ -411,7 +459,7 @@ export default function StitchPage() {
             : "";
         setProgressMsg(
           done > 0
-            ? `${done} stitched video${done === 1 ? "" : "s"} sent to Multiplier.${failNote} Keep adding here, or open Multiplier to edit.`
+            ? `${done} stitched video${done === 1 ? "" : "s"} sent to ${destLabel}.${failNote} Keep adding here, or open ${destLabel} to edit.`
             : "",
         );
         if (!hasIncompleteRows(readStitchBatch())) {
@@ -452,7 +500,7 @@ export default function StitchPage() {
         const driveFileId = rowDriveIds(clips)[0]!;
         onProgress("queueing Drive clip on the server…");
         patchStitchRow(batchRowIndex, { status: "completed" });
-        await enqueueMultiplierFromStitch({
+        await enqueueHandoff({
           videoLabel: name,
           driveFileId,
           aiInstructions: notes,
@@ -469,8 +517,8 @@ export default function StitchPage() {
           jobId,
           status: "processing",
         });
-        onProgress("queueing Multiplier on the server…");
-        await enqueueMultiplierFromStitch({
+        onProgress(`queueing ${destLabel} on the server…`);
+        await enqueueHandoff({
           videoLabel: name,
           stitchJobId: jobId,
           aiInstructions: notes,
@@ -491,7 +539,7 @@ export default function StitchPage() {
             );
           }
           patchStitchRow(batchRowIndex, { status: "completed" });
-          await enqueueMultiplierFromStitch({
+          await enqueueHandoff({
             videoLabel: label,
             sourceVideoUrl: bunnyUrl,
             aiInstructions: notes,
@@ -506,8 +554,8 @@ export default function StitchPage() {
             jobId,
             status: "processing",
           });
-          onProgress("queueing Multiplier on the server…");
-          await enqueueMultiplierFromStitch({
+          onProgress(`queueing ${destLabel} on the server…`);
+          await enqueueHandoff({
             videoLabel: name,
             stitchJobId: jobId,
             aiInstructions: notes,
@@ -521,7 +569,7 @@ export default function StitchPage() {
 
       patchUiRow(uiRowId, {
         runStatus: "done",
-        runProgress: "Sent to Multiplier",
+        runProgress: `Sent to ${destLabel}`,
         clips: [],
         batchRowIndex: undefined,
       });
@@ -560,11 +608,12 @@ export default function StitchPage() {
     drainStitchPool();
   }
 
-  async function startStitch(): Promise<void> {
+  async function startStitch(fromRows?: StitchRow[]): Promise<void> {
     setErrorMsg("");
     setRecoveryBanner(null);
 
-    const claimable = rows.filter(
+    const sourceRows = fromRows ?? rows;
+    const claimable = sourceRows.filter(
       (r) =>
         r.clips.length > 0 &&
         (r.runStatus === "idle" || r.runStatus === "failed"),
@@ -688,9 +737,9 @@ export default function StitchPage() {
           patchStitchRow(row.rowIndex, { jobId });
         }
 
-        setProgressMsg(`${label}: queueing Multiplier on the server…`);
+        setProgressMsg(`${label}: queueing ${destLabel} on the server…`);
         try {
-          await enqueueMultiplierFromStitch({
+          await enqueueHandoff({
             videoLabel: row.outputFilename,
             stitchJobId: jobId,
             aiInstructions: row.aiInstructions,
@@ -698,7 +747,7 @@ export default function StitchPage() {
         } catch (e) {
           patchStitchRow(row.rowIndex, {
             status: "failed",
-            error: e instanceof Error ? e.message : "Could not queue Multiplier.",
+            error: e instanceof Error ? e.message : `Could not queue ${destLabel}.`,
           });
           unrecoverable += 1;
           continue;
@@ -732,7 +781,7 @@ export default function StitchPage() {
           ? ` ${unrecoverable} could not be recovered — re-add those clips.`
           : "";
       setProgressMsg(
-        `Recovered ${recovered} stitched video${recovered === 1 ? "" : "s"} → Multiplier.${missingNote}`,
+        `Recovered ${recovered} stitched video${recovered === 1 ? "" : "s"} → ${destLabel}.${missingNote}`,
       );
     } catch (e) {
       setStatus("error");
@@ -743,6 +792,68 @@ export default function StitchPage() {
   function discardRecovery(): void {
     clearStitchBatch();
     setRecoveryBanner(null);
+  }
+
+  function applyAutoGroupRows(
+    groups: Awaited<ReturnType<typeof autoGroupDriveClips>>["groups"],
+    filesById: Map<string, DriveInboxFile>,
+  ): StitchRow[] {
+    const kept = rowsRef.current.filter(
+      (r) => rowIsLocked(r) || r.runStatus === "done",
+    );
+    const grouped: StitchRow[] = [];
+    for (const g of groups) {
+      const picks = g.fileIds
+        .map((id) => filesById.get(id))
+        .filter((f): f is DriveInboxFile => Boolean(f));
+      if (picks.length === 0) continue;
+      grouped.push({
+        ...emptyStitchRow(),
+        clips: driveClipsFromInbox(picks),
+        groupReason: g.reason,
+      });
+    }
+    const next = [...kept, ...grouped];
+    return next.length > 0 ? next : [emptyStitchRow()];
+  }
+
+  async function runAutoGroup(picks: DriveInboxFile[]): Promise<void> {
+    if (autoGrouping || status === "uploading" || status === "resuming") return;
+    setErrorMsg("");
+    setAutoGrouping(true);
+    setProgressMsg("Starting Drive auto-group…");
+    try {
+      const result = await autoGroupDriveClips(picks, (msg) => {
+        setProgressMsg(msg);
+      });
+      const next = applyAutoGroupRows(result.groups, result.filesById);
+      setRows(next);
+      const stitchN = result.groups.filter((g) => g.kind === "stitch").length;
+      const soloN = result.groups.filter((g) => g.kind === "solo").length;
+      const failNote =
+        result.transcribeErrors.length > 0
+          ? ` ${result.transcribeErrors.length} clip${
+              result.transcribeErrors.length === 1 ? "" : "s"
+            } had no transcript and were queued solo.`
+          : "";
+      if (processAfterGroup) {
+        setProgressMsg(
+          `Grouped ${stitchN} stitch + ${soloN} solo.${failNote} Sending to ${destLabel}…`,
+        );
+        setAutoGrouping(false);
+        await startStitch(next);
+        return;
+      }
+      setProgressMsg(
+        `Grouped ${stitchN} stitch video${stitchN === 1 ? "" : "s"} and ${soloN} solo.${failNote} Review the rows, then Process.`,
+      );
+    } catch (e) {
+      setErrorMsg(
+        e instanceof Error ? e.message : "Auto-group from Drive failed.",
+      );
+    } finally {
+      setAutoGrouping(false);
+    }
   }
 
   const claimableRows = rows.filter(
@@ -767,7 +878,7 @@ export default function StitchPage() {
         <DismissableHint id="stitch-subtitle">
           <p className="mt-1 text-sm text-stone-600">
             Process up to {STITCH_CONCURRENCY} videos at once. Keep adding while
-            others stitch — finished videos go to Multiplier as they complete.
+            others stitch — finished videos go to {destLabel} as they complete.
           </p>
         </DismissableHint>
         {driveInboxConfigured === false ? (
@@ -842,19 +953,47 @@ export default function StitchPage() {
       />
 
       <section className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-stone-500">
             {rows.length} video{rows.length === 1 ? "" : "s"} · {totalClips} clip
             {totalClips === 1 ? "" : "s"} · {formatBytes(totalBytes)}
           </h2>
-          <button
-            type="button"
-            onClick={addRow}
-            className="rounded-md border border-stone-300 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
-          >
-            + Add video
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {autoGroupAllowed ? (
+              <button
+                type="button"
+                disabled={poolActive || autoGrouping}
+                onClick={() => setAutoGroupPickerOpen(true)}
+                className="rounded-md border border-palette-teal bg-palette-pale/40 px-2.5 py-1 text-xs font-medium text-palette-depth hover:bg-palette-pale/70 disabled:opacity-40"
+              >
+                Auto-group from Drive
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={autoGrouping}
+              onClick={addRow}
+              className="rounded-md border border-stone-300 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-40"
+            >
+              + Add video
+            </button>
+          </div>
         </div>
+        {autoGroupAllowed ? (
+          <label className="flex items-start gap-2 text-xs text-stone-600">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={processAfterGroup}
+              disabled={poolActive || autoGrouping}
+              onChange={(e) => setProcessAfterGroup(e.target.checked)}
+            />
+            <span>
+              After auto-group, process stitch and solo rows → {destLabel}
+              immediately.
+            </span>
+          </label>
+        ) : null}
         <div className="space-y-3">
           {rows.map((row, rowIdx) => {
             const locked = rowIsLocked(row);
@@ -909,7 +1048,7 @@ export default function StitchPage() {
                   ) : null}
                   {row.runStatus === "done" ? (
                     <span className="ml-2 text-xs font-medium text-emerald-700">
-                      Sent to Multiplier
+                      Sent to {destLabel}
                     </span>
                   ) : null}
                   {row.runStatus === "failed" ? (
@@ -921,7 +1060,7 @@ export default function StitchPage() {
                 <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
-                    disabled={locked}
+                    disabled={locked || autoGrouping}
                     onClick={() => {
                       setPickerRowId(row.id);
                       fileInputRef.current?.click();
@@ -984,6 +1123,12 @@ export default function StitchPage() {
                   </button>
                 </div>
               </div>
+              {row.groupReason ? (
+                <p className="mb-2 text-xs text-stone-500">
+                  {row.clips.length >= 2 ? "Stitch: " : "Solo: "}
+                  {row.groupReason}
+                </p>
+              ) : null}
               {row.runProgress || row.runError ? (
                 <p
                   className={`mb-2 text-xs ${
@@ -1076,28 +1221,28 @@ export default function StitchPage() {
       <section className="flex flex-wrap items-center gap-3">
         <button
           type="button"
-          onClick={startStitch}
-          disabled={resumeBusy || claimableRows.length < 1}
+          onClick={() => void startStitch()}
+          disabled={resumeBusy || autoGrouping || claimableRows.length < 1}
           className="rounded-lg bg-emerald-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {resumeBusy
             ? "Resuming…"
             : poolActive
-              ? `Process ${claimableRows.length} more → Multiplier`
-              : `Process ${claimableRows.length} video${claimableRows.length === 1 ? "" : "s"} → Multiplier`}
+              ? `Process ${claimableRows.length} more → ${destLabel}`
+              : `Process ${claimableRows.length} video${claimableRows.length === 1 ? "" : "s"} → ${destLabel}`}
         </button>
         {handedOffCount > 0 ? (
           <button
             type="button"
-            onClick={() => router.push("/multiplier?fromStitch=1")}
+            onClick={() => router.push(destPath)}
             className="rounded-lg border border-emerald-700 bg-white px-5 py-2.5 text-sm font-semibold text-emerald-800 shadow-sm hover:bg-emerald-50"
           >
-            Open Multiplier ({handedOffCount} ready)
+            Open {destLabel} ({handedOffCount} ready)
           </button>
         ) : null}
       </section>
 
-      {(poolActive || progressMsg || errorMsg) && (
+      {(poolActive || autoGrouping || progressMsg || errorMsg) && (
         <section
           className={`rounded-lg border px-4 py-3 text-sm ${
             errorMsg
@@ -1111,7 +1256,7 @@ export default function StitchPage() {
             </p>
           ) : (
             <p>
-              {poolActive && (
+              {(poolActive || autoGrouping) && (
                 <span className="mr-2 inline-block animate-pulse">●</span>
               )}
               {progressMsg}
@@ -1124,14 +1269,11 @@ export default function StitchPage() {
         open={driveModalRowId !== null}
         onClose={() => setDriveModalRowId(null)}
         disabled={
-          !!driveModalRowId &&
-          rowIsLocked(rows.find((r) => r.id === driveModalRowId) ?? {
-            id: "",
-            clips: [],
-            aiInstructions: "",
-            showAiInstructions: false,
-            runStatus: "idle",
-          })
+          autoGrouping ||
+          (!!driveModalRowId &&
+            rowIsLocked(
+              rows.find((r) => r.id === driveModalRowId) ?? emptyStitchRow(),
+            ))
         }
         onAddClips={(picks) => {
           if (!driveModalRowId) return false;
@@ -1140,6 +1282,18 @@ export default function StitchPage() {
           return addDriveClipsToRow(driveModalRowId, picks);
         }}
       />
+
+      {autoGroupAllowed ? (
+        <DriveClipPickerModal
+          open={autoGroupPickerOpen}
+          variant="auto-group"
+          onClose={() => setAutoGroupPickerOpen(false)}
+          disabled={autoGrouping || poolActive}
+          onAutoGroup={(picks) => {
+            void runAutoGroup(picks);
+          }}
+        />
+      ) : null}
 
     </main>
   );

@@ -6,6 +6,7 @@ import {
   localQueueStatusFromHub,
   mergeOutputsState,
   outputReadyToSchedule,
+  enableNewlyWantedOutputs,
 } from "../lib/multiplier-queue/output-state";
 
 function main() {
@@ -80,6 +81,33 @@ function main() {
     failedOutputSummary(merged),
     "Image: boom",
   );
+
+  const shortOnly = buildInitialOutputs({
+    carousel: false,
+    photo: false,
+    short: true,
+  });
+  const widened = enableNewlyWantedOutputs(shortOnly, {
+    carousel: true,
+    photo: false,
+    short: true,
+  });
+  assert.equal(widened.carousel?.status, "queued");
+  assert.equal(widened.short?.status, "queued");
+  assert.equal(widened.photo?.status, "skipped");
+
+  const keepDone = enableNewlyWantedOutputs(
+    { carousel: { status: "done", attempts: 1 } },
+    { carousel: true, photo: true, short: false },
+  );
+  assert.equal(keepDone.carousel?.status, "done");
+  assert.equal(keepDone.photo?.status, "queued");
+
+  const skippedMustNotClobberQueued = mergeOutputsState(
+    { carousel: { status: "queued", attempts: 0 } },
+    { carousel: { status: "skipped" } },
+  );
+  assert.equal(skippedMustNotClobberQueued.carousel?.status, "queued");
 
   console.log("multiplier-output-state-test: ok");
 }

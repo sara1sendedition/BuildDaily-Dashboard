@@ -28,8 +28,11 @@ import { getShortEditorialNotesFromStorage } from "@/lib/short-editorial-notes-s
 import { getStudioShortPipelineSettingsFromStorage } from "@/lib/studio-short-pipeline-settings";
 import { mergeShortEditorialBriefParts } from "@/lib/merge-short-editorial-brief";
 import {
+  DEFAULT_STUDIO_OUTPUTS,
+  inferStudioOutputsFromQueuePayload,
   X_THREADS_OUTPUT_ENABLED,
   withEffectiveStudioOutputs,
+  type StudioOutputToggles,
 } from "@/lib/studio-output-flags";
 import {
   getCopyContextFromStorage,
@@ -124,6 +127,12 @@ import {
   clampFrameColorAdjust,
   type FrameColorAdjust,
 } from "@/lib/frame-color-adjust";
+
+export {
+  SHORT_ONLY_STUDIO_OUTPUTS,
+  isShortOnlyStudioOutputs,
+  type StudioOutputToggles,
+} from "@/lib/studio-output-flags";
 
 const DEFAULT_BRANDING_ID = "default";
 
@@ -302,21 +311,6 @@ function carouselZipFilename(videoFileName: string): string {
   return `${base}_carousel.zip`;
 }
 
-/** Per-run toggles for which deliverables to generate after upload or on “Regenerate”. */
-export type StudioOutputToggles = {
-  carousel: boolean;
-  imagePost: boolean;
-  xPost: boolean;
-  reelShort: boolean;
-};
-
-const DEFAULT_STUDIO_OUTPUTS: StudioOutputToggles = {
-  carousel: true,
-  imagePost: true,
-  xPost: X_THREADS_OUTPUT_ENABLED,
-  reelShort: true,
-};
-
 export type VideoQueueItem = {
   id: string;
   /**
@@ -374,6 +368,11 @@ export type VideoQueueItem = {
   durableProcessing?: boolean;
   /** Per-output process + ready-to-schedule state (from Hub payload). */
   outputs?: MultiplierOutputsState;
+  /**
+   * Formats requested when this row was enqueued. Video Editor sets short-only
+   * so Multiplier's global toggles cannot hijack processing or the VE list.
+   */
+  studioOutputs?: StudioOutputToggles;
 };
 
 /** Single-frame 4:5 Instagram image post from the same video as the carousel. */
@@ -460,6 +459,8 @@ type CarouselWorkspaceValue = {
       driveFileIdsByIndex?: Array<string | undefined>;
       /** Stitch job ids for server-side ingest (parallel to `files`). */
       stitchJobIdsByIndex?: Array<string | undefined>;
+      /** Per-item formats; defaults to the Multiplier UI toggles. */
+      studioOutputs?: StudioOutputToggles;
     }
   ) => string[];
   file: File | null;
@@ -584,6 +585,8 @@ type CarouselWorkspaceValue = {
   ) => Promise<void>;
   /** True after the first Hub queue list attempt finishes (ok, empty, or failed). */
   hubQueueHydrationDone: boolean;
+  /** Re-list Hub queue and merge any rows created while this tab was open (e.g. Stitch). */
+  resyncHubQueue: () => Promise<void>;
 };
 
 const CarouselWorkspaceContext = createContext<CarouselWorkspaceValue | null>(
@@ -1790,6 +1793,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       | "driveFileId"
       | "stitchJobId"
       | "error"
+      | "studioOutputs"
     >,
   ): MultiplierQueuePayload {
     if (!snap) {
@@ -1803,6 +1807,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         ...(q?.driveFileId ? { driveFileId: q.driveFileId } : {}),
         ...(q?.stitchJobId ? { stitchJobId: q.stitchJobId } : {}),
         ...(q?.outputs ? { outputs: q.outputs } : {}),
+        ...(q?.studioOutputs ? { studioOutputs: q.studioOutputs } : {}),
         ...(q?.error ? { error: q.error } : {}),
       };
     }
@@ -1817,6 +1822,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       ...(q?.driveFileId ? { driveFileId: q.driveFileId } : {}),
       ...(q?.stitchJobId ? { stitchJobId: q.stitchJobId } : {}),
       ...(q?.outputs ? { outputs: q.outputs } : {}),
+      ...(q?.studioOutputs ? { studioOutputs: q.studioOutputs } : {}),
       ...(q?.error ? { error: q.error } : {}),
       ...(snap.socialCaption ? { socialCaption: snap.socialCaption } : {}),
       ...(() => {
@@ -1846,6 +1852,190 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     };
   }
 
+  function localStateFromHubItem(item: HubMultiplierQueueItem): {
+    row: VideoQueueItem;
+    snap: QueueCarouselSnapshot;
+  } {
+    const payload =
+      item.payload && typeof item.payload === "object"
+        ? (item.payload as MultiplierQueuePayload)
+        : ({ v: 1 } as MultiplierQueuePayload);
+    const stubFile = new File([], item.videoLabel || "video.mp4", {
+      type: "video/mp4",
+    });
+    const payloadShortJobId =
+      typeof payload.shortJobId === "string" && payload.shortJobId.trim()
+        ? payload.shortJobId.trim()
+        : undefined;
+    const payloadRevision =
+      typeof payload.shortOutputRevision === "number" &&
+      payload.shortOutputRevision > 0
+        ? Math.floor(payload.shortOutputRevision)
+        : undefined;
+    const processingJobId =
+      typeof payload.processingJobId === "string" &&
+      payload.processingJobId.trim()
+        ? payload.processingJobId.trim()
+        : undefined;
+    const driveFileId =
+      typeof payload.driveFileId === "string" && payload.driveFileId.trim()
+        ? payload.driveFileId.trim()
+        : undefined;
+    const stitchJobId =
+      typeof payload.stitchJobId === "string" && payload.stitchJobId.trim()
+        ? payload.stitchJobId.trim()
+        : undefined;
+    const sourceVideoUrl =
+      typeof payload.bunnyUrls?.sourceVideoUrl === "string" &&
+      payload.bunnyUrls.sourceVideoUrl.trim()
+        ? payload.bunnyUrls.sourceVideoUrl.trim()
+        : undefined;
+    const canResumeDurable =
+      !processingJobId &&
+      Boolean(driveFileId || stitchJobId || sourceVideoUrl) &&
+      item.status === "processing";
+    const durableProcessing = Boolean(processingJobId) || canResumeDurable;
+    const interruptedProcessing =
+      item.status === "processing" &&
+      stubFile.size === 0 &&
+      !durableProcessing &&
+      !driveFileId &&
+      !stitchJobId &&
+      !sourceVideoUrl;
+    const outputs =
+      payload.outputs && typeof payload.outputs === "object"
+        ? payload.outputs
+        : undefined;
+    const studioOutputs = inferStudioOutputsFromQueuePayload(payload);
+    const queueStatus: VideoQueueItem["status"] = localQueueStatusFromHub({
+      hubStatus: item.status,
+      outputs,
+      bunnyUrls: payload.bunnyUrls,
+      interrupted: interruptedProcessing,
+      canResume: canResumeDurable,
+    });
+    const progressFromOutputs = (() => {
+      if (canResumeDurable) return "Re-queueing on server…";
+      if (!outputs) return undefined;
+      for (const key of ["carousel", "photo", "short"] as const) {
+        const p = outputs[key]?.progress;
+        if (typeof p === "string" && p.trim()) return p.trim();
+      }
+      if (item.status === "processing") return "Processing on server…";
+      return undefined;
+    })();
+    const queueRow: VideoQueueItem = {
+      id: item.id,
+      file: stubFile,
+      status: queueStatus,
+      ...(driveFileId ? { driveFileId } : {}),
+      ...(stitchJobId ? { stitchJobId } : {}),
+      ...(payloadShortJobId ? { shortJobId: payloadShortJobId } : {}),
+      ...(payloadRevision != null
+        ? { shortOutputRevision: payloadRevision }
+        : {}),
+      ...(processingJobId
+        ? { processingJobId, durableProcessing: true }
+        : canResumeDurable
+          ? { durableProcessing: true }
+          : {}),
+      ...(outputs ? { outputs } : {}),
+      ...(studioOutputs ? { studioOutputs } : {}),
+      ...(progressFromOutputs ? { progress: progressFromOutputs } : {}),
+      ...(outputs?.short?.status === "failed" && outputs.short.error
+        ? { shortError: outputs.short.error }
+        : {}),
+      ...(queueStatus === "error"
+        ? {
+            error: interruptedProcessing
+              ? "Processing was interrupted. Re-upload your video or return from Stitch to continue."
+              : sanitizeQueueErrorMessage(
+                  (typeof payload.error === "string" && payload.error.trim()
+                    ? payload.error.trim()
+                    : failedOutputSummary(outputs) || "Processing failed."),
+                ),
+          }
+        : {}),
+    };
+    const hydratedTranscript =
+      normalizeTranscriptSegments(payload.transcript) ?? [];
+    const snap: QueueCarouselSnapshot = {
+      recommendation: null,
+      effectiveType:
+        typeof payload.effectiveType === "string"
+          ? (payload.effectiveType as QueueCarouselSnapshot["effectiveType"])
+          : null,
+      editableSlides: Array.isArray(payload.editableSlides)
+        ? payload.editableSlides.map((s, i) => ({
+            order: i + 1,
+            headline: typeof s.headline === "string" ? s.headline : "",
+            ...(typeof s.body === "string" ? { body: s.body } : {}),
+            evidenceSegmentIds: [],
+          }))
+        : [],
+      transcript: hydratedTranscript,
+      durationSec:
+        typeof payload.durationSec === "number" ? payload.durationSec : null,
+      zipBase64: null,
+      firstSlidePreviewBase64: null,
+      slidePreviewBase64s: null,
+      socialCaption:
+        typeof payload.socialCaption === "string" ? payload.socialCaption : "",
+      layoutId: (payload.layoutId as LayoutId | undefined) ?? "stacked_center",
+      carouselOverride:
+        (payload.carouselOverride as CarouselType | "" | undefined) ?? "",
+      backgroundSource: "video_moments",
+      backgroundFile: null,
+      imagePost: imagePostFromHubPayload(
+        payload,
+        hydratedTranscript,
+        typeof payload.durationSec === "number" ? payload.durationSec : null,
+      ),
+      imagePostError: null,
+      socialMicro: null,
+      socialMicroError: null,
+      processTiming: null,
+      frameColorAdjust: DEFAULT_FRAME_COLOR_ADJUST,
+      ...(payload.bunnyUrls ? { bunnyUrls: payload.bunnyUrls } : {}),
+    };
+    if (queueRow.status === "done") {
+      queueRow.studioContentBaseline = studioContentFingerprint(queueRow, snap);
+    }
+    return { row: queueRow, snap };
+  }
+
+  function appendMissingHubItems(items: HubMultiplierQueueItem[]) {
+    const existingIds = new Set(queueRef.current.map((q) => q.id));
+    const newcomers = items.filter((item) => !existingIds.has(item.id));
+    if (newcomers.length === 0) return;
+    const newQueueRows: VideoQueueItem[] = [];
+    const newSnapshots: Record<string, QueueCarouselSnapshot> = {};
+    for (const item of newcomers) {
+      const { row, snap } = localStateFromHubItem(item);
+      newQueueRows.push(row);
+      newSnapshots[item.id] = snap;
+      hubHydratedRef.current.add(item.id);
+      hubSyncSuppressRef.current.add(item.id);
+    }
+    setQueue((prev) => {
+      const ids = new Set(prev.map((q) => q.id));
+      const merged = [
+        ...prev,
+        ...newQueueRows.filter((r) => !ids.has(r.id)),
+      ];
+      queueRef.current = merged;
+      return merged;
+    });
+    setQueueResults((qr) => {
+      const next = { ...qr };
+      for (const [id, snap] of Object.entries(newSnapshots)) {
+        if (!next[id]) next[id] = snap;
+      }
+      queueResultsRef.current = next;
+      return next;
+    });
+  }
+
   // ---- Hydrate once on mount -----------------------------------------------
   useEffect(() => {
     let cancelled = false;
@@ -1859,166 +2049,10 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       const itemsToHydrate: HubMultiplierQueueItem[] = res.data;
       if (itemsToHydrate.length === 0) return;
 
-      // Build VideoQueueItem stubs + QueueCarouselSnapshot stubs.
       const newQueueRows: VideoQueueItem[] = [];
       const newSnapshots: Record<string, QueueCarouselSnapshot> = {};
       for (const item of itemsToHydrate) {
-        const payload =
-          (item.payload && typeof item.payload === "object"
-            ? (item.payload as MultiplierQueuePayload)
-            : { v: 1 as const });
-        // Stub File: zero bytes, real name + type. Lets UI render the name;
-        // re-process / re-upload flows will detect empty bytes and prompt.
-        const stubFile = new File([], item.videoLabel || "video.mp4", {
-          type: "video/mp4",
-        });
-        const payloadShortJobId =
-          typeof payload.shortJobId === "string" && payload.shortJobId.trim()
-            ? payload.shortJobId.trim()
-            : undefined;
-        const payloadRevision =
-          typeof payload.shortOutputRevision === "number" &&
-          payload.shortOutputRevision > 0
-            ? Math.floor(payload.shortOutputRevision)
-            : undefined;
-        const processingJobId =
-          typeof payload.processingJobId === "string" &&
-          payload.processingJobId.trim()
-            ? payload.processingJobId.trim()
-            : undefined;
-        const driveFileId =
-          typeof payload.driveFileId === "string" && payload.driveFileId.trim()
-            ? payload.driveFileId.trim()
-            : undefined;
-        const stitchJobId =
-          typeof payload.stitchJobId === "string" && payload.stitchJobId.trim()
-            ? payload.stitchJobId.trim()
-            : undefined;
-        const sourceVideoUrl =
-          typeof payload.bunnyUrls?.sourceVideoUrl === "string" &&
-          payload.bunnyUrls.sourceVideoUrl.trim()
-            ? payload.bunnyUrls.sourceVideoUrl.trim()
-            : undefined;
-        // Stuck overnight batch: Hub row is "processing" with a Bunny URL but
-        // no ProcessingJob (durable create used to 404 via Hub). Re-queue on
-        // the server instead of marking interrupted.
-        const canResumeDurable =
-          !processingJobId &&
-          Boolean(driveFileId || stitchJobId || sourceVideoUrl) &&
-          item.status === "processing";
-        const durableProcessing = Boolean(processingJobId) || canResumeDurable;
-        const interruptedProcessing =
-          item.status === "processing" &&
-          stubFile.size === 0 &&
-          !durableProcessing &&
-          !driveFileId &&
-          !stitchJobId &&
-          !sourceVideoUrl;
-        const outputs =
-          payload.outputs && typeof payload.outputs === "object"
-            ? payload.outputs
-            : undefined;
-        const queueStatus: VideoQueueItem["status"] = localQueueStatusFromHub({
-          hubStatus: item.status,
-          outputs,
-          bunnyUrls: payload.bunnyUrls,
-          interrupted: interruptedProcessing,
-          canResume: canResumeDurable,
-        });
-        const progressFromOutputs = (() => {
-          if (canResumeDurable) return "Re-queueing on server…";
-          if (!outputs) return undefined;
-          for (const key of ["carousel", "photo", "short"] as const) {
-            const p = outputs[key]?.progress;
-            if (typeof p === "string" && p.trim()) return p.trim();
-          }
-          if (item.status === "processing") return "Processing on server…";
-          return undefined;
-        })();
-        const queueRow: VideoQueueItem = {
-          id: item.id,
-          file: stubFile,
-          status: queueStatus,
-          ...(driveFileId ? { driveFileId } : {}),
-          ...(stitchJobId ? { stitchJobId } : {}),
-          ...(payloadShortJobId ? { shortJobId: payloadShortJobId } : {}),
-          ...(payloadRevision != null
-            ? { shortOutputRevision: payloadRevision }
-            : {}),
-          ...(processingJobId
-            ? { processingJobId, durableProcessing: true }
-            : canResumeDurable
-              ? { durableProcessing: true }
-              : {}),
-          ...(outputs ? { outputs } : {}),
-          ...(progressFromOutputs ? { progress: progressFromOutputs } : {}),
-          ...(outputs?.short?.status === "failed" && outputs.short.error
-            ? { shortError: outputs.short.error }
-            : {}),
-          ...(queueStatus === "error"
-            ? {
-                error: interruptedProcessing
-                  ? "Processing was interrupted. Re-upload your video or return from Stitch to continue."
-                  : sanitizeQueueErrorMessage(
-                      (typeof payload.error === "string" && payload.error.trim()
-                        ? payload.error.trim()
-                        : failedOutputSummary(outputs) ||
-                          "Processing failed."),
-                    ),
-              }
-            : {}),
-        };
-        const hydratedTranscript =
-          normalizeTranscriptSegments(payload.transcript) ?? [];
-        const snap: QueueCarouselSnapshot = {
-          recommendation: null,
-          effectiveType:
-            typeof payload.effectiveType === "string"
-              ? (payload.effectiveType as QueueCarouselSnapshot["effectiveType"])
-              : null,
-          editableSlides: Array.isArray(payload.editableSlides)
-            ? payload.editableSlides.map((s, i) => ({
-                order: i + 1,
-                headline: typeof s.headline === "string" ? s.headline : "",
-                ...(typeof s.body === "string" ? { body: s.body } : {}),
-                evidenceSegmentIds: [],
-              }))
-            : [],
-          transcript: hydratedTranscript,
-          durationSec:
-            typeof payload.durationSec === "number"
-              ? payload.durationSec
-              : null,
-          zipBase64: null,
-          firstSlidePreviewBase64: null,
-          slidePreviewBase64s: null,
-          socialCaption:
-            typeof payload.socialCaption === "string"
-              ? payload.socialCaption
-              : "",
-          layoutId: (payload.layoutId as LayoutId | undefined) ?? "stacked_center",
-          carouselOverride:
-            (payload.carouselOverride as CarouselType | "" | undefined) ?? "",
-          backgroundSource: "video_moments",
-          backgroundFile: null,
-          imagePost: imagePostFromHubPayload(
-            payload,
-            hydratedTranscript,
-            typeof payload.durationSec === "number" ? payload.durationSec : null,
-          ),
-          imagePostError: null,
-          socialMicro: null,
-          socialMicroError: null,
-          processTiming: null,
-          frameColorAdjust: DEFAULT_FRAME_COLOR_ADJUST,
-          ...(payload.bunnyUrls ? { bunnyUrls: payload.bunnyUrls } : {}),
-        };
-        if (queueRow.status === "done") {
-          queueRow.studioContentBaseline = studioContentFingerprint(
-            queueRow,
-            snap
-          );
-        }
+        const { row: queueRow, snap } = localStateFromHubItem(item);
         newQueueRows.push(queueRow);
         newSnapshots[item.id] = snap;
         hubHydratedRef.current.add(item.id);
@@ -2612,6 +2646,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         outputs?.short?.status === "failed"
           ? outputs.short.error
           : undefined;
+      const studioOutputs = inferStudioOutputsFromQueuePayload(payload);
 
       setQueue((prev) => {
         const next = prev.map((q) => {
@@ -2650,6 +2685,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
               ? { shortOutputRevision: payload.shortOutputRevision }
               : {}),
             ...(shortError ? { shortError } : { shortError: undefined }),
+            ...(studioOutputs ? { studioOutputs } : {}),
             ...(localStatus === "done" && !q.studioContentBaseline
               ? {
                   studioContentBaseline: studioContentFingerprint(
@@ -2753,12 +2789,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     try {
       const res = await listMultiplierQueueFromHub({ limit: 100 });
       if (!res.ok) return;
+      appendMissingHubItems(res.data);
       const localDurableIds = new Set(
         queueRef.current
           .filter((q) => q.durableProcessing || q.processingJobId)
           .map((q) => q.id),
       );
-      if (localDurableIds.size === 0) return;
       for (const item of res.data) {
         if (!localDurableIds.has(item.id)) continue;
         applyHubItemToLocalQueue(item);
@@ -2766,6 +2802,16 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
     } finally {
       hubPollInFlightRef.current = false;
     }
+  }, [applyHubItemToLocalQueue]);
+
+  const resyncHubQueue = useCallback(async () => {
+    const res = await listMultiplierQueueFromHub({ limit: 100 });
+    if (!res.ok) return;
+    const localIds = new Set(queueRef.current.map((q) => q.id));
+    for (const item of res.data) {
+      if (localIds.has(item.id)) applyHubItemToLocalQueue(item);
+    }
+    appendMissingHubItems(res.data);
   }, [applyHubItemToLocalQueue]);
 
   useEffect(() => {
@@ -2794,7 +2840,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
 
   const enqueueDurableJobForItem = useCallback(
     async (item: VideoQueueItem) => {
-      const formats = withEffectiveStudioOutputs(studioOutputsRef.current);
+      const formats = withEffectiveStudioOutputs(
+        item.studioOutputs ?? studioOutputsRef.current,
+      );
       const patchItem = (patch: Partial<VideoQueueItem>) => {
         setQueue((prev) => {
           const next = prev.map((q) =>
@@ -2993,7 +3041,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         );
         if (!pending) break;
 
-        const formats = withEffectiveStudioOutputs(studioOutputsRef.current);
+        const formats = withEffectiveStudioOutputs(
+          pending.studioOutputs ?? studioOutputsRef.current,
+        );
         const needsTranscript =
           formats.carousel || formats.imagePost || formats.xPost;
         const mobileSequential = isMobileClient();
@@ -3557,6 +3607,8 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         driveFileIdsByIndex?: Array<string | undefined>;
         /** Stitch job ids for server-side ingest (parallel to `files`). */
         stitchJobIdsByIndex?: Array<string | undefined>;
+        /** Per-item formats; defaults to the Multiplier UI toggles. */
+        studioOutputs?: StudioOutputToggles;
       }
     ) => {
       const list = files.filter(isLikelyVideoFile);
@@ -3568,7 +3620,9 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         }
         return [];
       }
-      const o = withEffectiveStudioOutputs(studioOutputsRef.current);
+      const o = withEffectiveStudioOutputs(
+        opts?.studioOutputs ?? studioOutputsRef.current,
+      );
       if (!o.carousel && !o.imagePost && !o.xPost && !o.reelShort) {
         setError("Choose at least one output format before uploading.");
         return [];
@@ -3612,6 +3666,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             ? uniqueNotes[idx]!.trim().slice(0, MAX_CAROUSEL_FOCUS_CHARS)
             : undefined,
         status: "pending" as const,
+        studioOutputs: o,
         // Prefer durable server jobs so tab close does not kill the batch.
         durableProcessing: true,
       }));
@@ -5168,6 +5223,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       rehydrateSourceVideoFile,
       setOutputReadyToSchedule,
       hubQueueHydrationDone,
+      resyncHubQueue,
     }),
     [
       queue,
@@ -5250,6 +5306,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       rehydrateSourceVideoFile,
       setOutputReadyToSchedule,
       hubQueueHydrationDone,
+      resyncHubQueue,
     ]
   );
 

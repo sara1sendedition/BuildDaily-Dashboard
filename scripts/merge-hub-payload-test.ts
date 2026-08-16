@@ -7,6 +7,8 @@ import {
   sanitizeQueueErrorMessage,
   withQueueFailureError,
 } from "../lib/multiplier-queue/merge-hub-payload";
+import { unionOutputsWanted } from "../lib/multiplier/process-job-types";
+import { unionStudioOutputs } from "../lib/studio-output-flags";
 
 const current = {
   v: 1,
@@ -196,5 +198,32 @@ const stitchKept = mergeHubQueuePayload(
   { v: 1, stitchJobId: null },
 );
 assert.equal(stitchKept.stitchJobId, "stitch-keep");
+
+const unioned = unionOutputsWanted(
+  { carousel: true, photo: true, short: false },
+  { carousel: false, photo: false, short: true },
+);
+assert.equal(unioned.carousel, true);
+assert.equal(unioned.photo, true);
+assert.equal(unioned.short, true);
+assert.equal(unioned.xPost, undefined);
+
+const unionFromEmpty = unionOutputsWanted(undefined, {
+  carousel: false,
+  photo: false,
+  short: true,
+  xPost: true,
+});
+assert.equal(unionFromEmpty.carousel, false);
+assert.equal(unionFromEmpty.short, true);
+assert.equal(unionFromEmpty.xPost, true);
+
+const studioUnion = unionStudioOutputs(
+  { carousel: true, imagePost: true, xPost: false, reelShort: true },
+  { carousel: false, imagePost: false, xPost: false, reelShort: true },
+);
+assert.equal(studioUnion.carousel, true);
+assert.equal(studioUnion.imagePost, true);
+assert.equal(studioUnion.reelShort, true);
 
 console.log("merge-hub-payload-test: ok");

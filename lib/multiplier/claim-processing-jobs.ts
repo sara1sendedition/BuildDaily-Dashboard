@@ -153,13 +153,14 @@ export async function markProcessingJobAwaitingShort(opts: {
   leaseOwner: string;
   attempts: number;
   maxAttempts: number;
+  error?: string;
 }): Promise<"retried" | "ignored"> {
   return markProcessingJobFailedOrRetry({
     id: opts.id,
     leaseOwner: opts.leaseOwner,
     attempts: opts.attempts,
     maxAttempts: opts.maxAttempts,
-    error: "Awaiting Short encode…",
+    error: opts.error?.trim() || "Awaiting Short encode…",
     burnAttempt: false,
   }).then((r) => (r === "ignored" ? "ignored" : "retried"));
 }

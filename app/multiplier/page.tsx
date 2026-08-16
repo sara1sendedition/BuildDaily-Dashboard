@@ -11,7 +11,7 @@ import { SocialMicroPanel } from "@/app/components/SocialMicroPanel";
 import { RefinePanel } from "@/app/components/RefinePanel";
 import { CollapsibleSection } from "@/app/components/CollapsibleSection";
 import { FrameColorAdjustSliders } from "@/app/components/FrameColorAdjustSliders";
-import { useCarouselWorkspace } from "@/context/carousel-workspace-context";
+import { useCarouselWorkspace, isShortOnlyStudioOutputs } from "@/context/carousel-workspace-context";
 import { useScheduleStore } from "@/context/schedule-context";
 import { QueueItemEditableTitle } from "@/app/components/QueueItemEditableTitle";
 import { QueueItemOutputPills } from "@/app/components/QueueItemOutputPills";
@@ -110,13 +110,33 @@ export default function Home() {
     studioOutputs,
     setStudioOutputs,
     hubQueueHydrationDone,
+    resyncHubQueue,
   } = useCarouselWorkspace();
 
-  const activeQueueItem = queue.find((q) => q.id === activeQueueId);
+  const multiplierQueue = useMemo(
+    () => queue.filter((item) => !isShortOnlyStudioOutputs(item.studioOutputs)),
+    [queue],
+  );
+
+  const activeQueueItem =
+    multiplierQueue.find((q) => q.id === activeQueueId) ?? null;
   const activeItemProcessing = activeQueueItem?.status === "processing";
-  const queueHasActiveWork = queue.some(
+  const queueHasActiveWork = multiplierQueue.some(
     (q) => q.status === "processing" || q.status === "pending"
   );
+
+  useEffect(() => {
+    if (multiplierQueue.length === 0) return;
+    if (activeQueueId && multiplierQueue.some((q) => q.id === activeQueueId)) {
+      return;
+    }
+    selectQueueItem(multiplierQueue[0]!.id);
+  }, [multiplierQueue, activeQueueId, selectQueueItem]);
+
+  useEffect(() => {
+    if (!hubQueueHydrationDone) return;
+    void resyncHubQueue();
+  }, [hubQueueHydrationDone, resyncHubQueue]);
 
   const [mobileClient, setMobileClient] = useState(false);
   useEffect(() => {
@@ -1176,11 +1196,11 @@ export default function Home() {
           </details>
 
           <DriveInboxPanel
-            onEnqueueFiles={(files) => {
+            onEnqueueFiles={(files, opts) => {
               setShortSourceTool("multiplier");
-              enqueueFiles(files);
+              enqueueFiles(files, opts);
             }}
-            disabled={queue.some((q) => q.status === "processing")}
+            disabled={queueHasActiveWork}
           />
 
           <div className="flex flex-col items-center text-center rounded-2xl border-2 border-dashed border-palette-sage bg-white p-4 shadow-md shadow-stone-200/50">
@@ -1211,9 +1231,9 @@ export default function Home() {
           </div>
 
           <div className="mx-auto w-full max-w-full space-y-3 lg:max-w-none">
-            {queue.length > 0 ? (
+            {multiplierQueue.length > 0 ? (
               <div className="max-h-[min(52vh,22rem)] space-y-3 overflow-y-auto pr-0.5">
-                {queue.map((item) => {
+                {multiplierQueue.map((item) => {
                   const isActive = item.id === activeQueueId;
                   const handleRename = (id: string, displayLabel: string) => {
                     renameQueueItem(id, displayLabel);
@@ -1340,7 +1360,7 @@ export default function Home() {
                   : "Download all carousels (zip)"}
               </button>
             ) : null}
-            {queue.length === 0 ? (
+            {multiplierQueue.length === 0 ? (
               <div className="space-y-3" aria-hidden>
                 {Array.from({ length: 4 }, (_, i) => (
                   <div

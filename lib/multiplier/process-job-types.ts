@@ -73,3 +73,20 @@ export function parseMultiplierJobPayload(
       : {}),
   };
 }
+
+export type MultiplierOutputsWanted = MultiplierProcessingJobPayload["outputsWanted"];
+
+/** Enable any newly requested outputs without turning off ones already in flight. */
+export function unionOutputsWanted(
+  current: MultiplierOutputsWanted | undefined,
+  incoming: MultiplierOutputsWanted,
+): MultiplierOutputsWanted {
+  return {
+    carousel: current?.carousel === true || incoming.carousel,
+    photo: current?.photo === true || incoming.photo,
+    short: current?.short === true || incoming.short,
+    ...(current?.xPost === true || incoming.xPost === true
+      ? { xPost: true as const }
+      : {}),
+  };
+}
