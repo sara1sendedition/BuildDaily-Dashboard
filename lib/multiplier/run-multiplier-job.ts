@@ -38,6 +38,15 @@ import type { BunnyAssetUrls } from "@/lib/storage/bunny-upload-client";
 import type { CarouselType, LayoutId, TranscriptSegment } from "@/lib/types";
 import type { Prisma } from "@prisma/client";
 
+function isPrismaUniqueConflict(e: unknown): boolean {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    "code" in e &&
+    (e as { code: unknown }).code === "P2002"
+  );
+}
+
 async function patchQueueOutputs(opts: {
   queueItemId: string;
   userId: string;
@@ -47,9 +56,12 @@ async function patchQueueOutputs(opts: {
   kind?: "carousel" | "photo" | "short" | null;
   status?: "processing" | "done" | "failed";
 }): Promise<void> {
-  let existing = await prisma.multiplierQueueItem.findFirst({
-    where: { id: opts.queueItemId, userId: opts.userId },
+  let existing = await prisma.multiplierQueueItem.findUnique({
+    where: { id: opts.queueItemId },
   });
+  if (existing && existing.userId !== opts.userId) {
+    throw new Error("Queue item belongs to another account.");
+  }
   // Queue rows can be wiped by a client bug while the worker still runs.
   // Recreate a stub so output URLs / status are not lost.
   if (!existing) {
@@ -78,17 +90,26 @@ async function patchQueueOutputs(opts: {
       ...(job ? { processingJobId: job.id } : {}),
       ...(sourceVideoUrl ? { bunnyUrls: { sourceVideoUrl } } : {}),
     } as Prisma.InputJsonValue;
-    existing = await prisma.multiplierQueueItem.upsert({
-      where: { id: opts.queueItemId },
-      create: {
-        id: opts.queueItemId,
-        userId: opts.userId,
-        status: "processing",
-        videoLabel,
-        payload: stubPayload,
-      },
-      update: {},
-    });
+    try {
+      existing = await prisma.multiplierQueueItem.create({
+        data: {
+          id: opts.queueItemId,
+          userId: opts.userId,
+          status: "processing",
+          videoLabel,
+          payload: stubPayload,
+        },
+      });
+    } catch (e) {
+      if (!isPrismaUniqueConflict(e)) throw e;
+      existing = await prisma.multiplierQueueItem.findUnique({
+        where: { id: opts.queueItemId },
+      });
+      if (!existing || existing.userId !== opts.userId) throw e;
+    }
+  }
+  if (!existing) {
+    throw new Error("Could not load Multiplier queue item.");
   }
   const current =
     existing.payload && typeof existing.payload === "object"
