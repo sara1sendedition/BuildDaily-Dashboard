@@ -4,7 +4,8 @@ export const MAX_STITCH_AUTO_GROUP_FILES = 40;
 export const MAX_STITCH_GROUP_TRANSCRIPT_CHARS = 1800;
 /** Consecutive clips closer than this are likely one take split across files. */
 export const STITCH_HEURISTIC_GAP_MS = 8 * 60 * 1000;
-export const STITCH_HEURISTIC_SEQ_GAP_MS = 15 * 60 * 1000;
+/** Sequential IMG_1234 / IMG_1235 can span a short filming block (listicles). */
+export const STITCH_HEURISTIC_SEQ_GAP_MS = 45 * 60 * 1000;
 export const STITCH_HEURISTIC_MAX_GROUP = 6;
 
 export type StitchGroupKind = "stitch" | "solo";

@@ -26,23 +26,24 @@ function formatClipBlock(clip: StitchGroupClipInput, index: number): string {
 
 const SYSTEM = `You group phone-camera teaching clips into stitch groups vs standalone videos.
 
-The creator records climbing/coaching takes. One teaching point is often split across 2–4 clips because they paused the camera. Other clips are complete on their own and must NOT be concatenated.
+The creator records climbing/coaching takes. Camera filenames (IMG_1234, IMG_1235, …) are the strongest grouping signal: consecutive names in time order are usually one piece she paused between. Transcripts confirm continuation and catch list-style scripts.
 
 Stitch (2+ clips, in chronological speaking order) when:
+- Filenames are sequential (IMG_1234 / IMG_1235 / IMG_1236). Stitch those unless the transcripts clearly change topic or audience.
+- An opener promises a numbered list ("here's 3 ways…", "two cues for…", "a few things") and later clips start with ordinals: "first,", "second,", "next,", "then,", "last,", "finally,". Those follow-ups belong with the opener even if each clip sounds complete on its own.
 - The later clip continues the same thought (mid-sentence, "anyway", "so yeah", "as I was saying").
 - Same drill/cue, clearly a restart or pickup of the previous take.
-- Sequential camera names (IMG_1234 / IMG_1235) AND the transcripts match one take.
 
 Keep solo when:
-- The clip is a complete standalone point (even if recorded minutes later in the same session).
-- Topic, drill, or audience changes.
-- You are unsure. Prefer solo over a wrong stitch.
+- Filename sequence breaks (a gap in IMG numbers) AND the transcript is a new complete point.
+- Topic, drill, or audience clearly changes.
+- Do not glue unrelated sequential files just because they were filmed the same hour if the speech is a new standalone lesson with no list/continuation cues.
 
 Rules:
 - Use every fileId exactly once. Do not invent ids.
-- Preserve speaking order inside a group (usually modifiedAt / filename sequence).
-- Prefer small groups (2–4). Do not dump a whole session into one stitch.
-- Time proximity and sequential filenames are hints, not proof.
+- Preserve speaking order inside a group (filename sequence, then modifiedAt).
+- A promised list should stay one stitch (intro + each "first/next" part). Typical size 2–5; do not dump a whole session into one stitch.
+- Sequential filenames outweigh "this clip could stand alone." "First," / "next," after a list intro is continuation, not a new video.
 
 Return JSON only:
 {"groups":[{"fileIds":["id1","id2"],"reason":"short why"},{"fileIds":["id3"],"reason":"short why"}]}`;

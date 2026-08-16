@@ -62,4 +62,32 @@ assert.equal(heur[0]!.kind, "stitch");
 assert.deepEqual(heur[1]!.fileIds, ["3"]);
 assert.equal(heur[1]!.kind, "solo");
 
+const listicle: StitchGroupClipInput[] = [
+  {
+    fileId: "a",
+    name: "IMG_1101.MOV",
+    modifiedAt: "2026-08-15T18:00:00.000Z",
+    durationSec: 12,
+    text: "here are three ways to make climbing easier",
+  },
+  {
+    fileId: "b",
+    name: "IMG_1102.MOV",
+    modifiedAt: "2026-08-15T18:08:00.000Z",
+    durationSec: 20,
+    text: "first, keep your hips in",
+  },
+  {
+    fileId: "c",
+    name: "IMG_1103.MOV",
+    modifiedAt: "2026-08-15T18:22:00.000Z",
+    durationSec: 18,
+    text: "next, trust your feet",
+  },
+];
+const listHeur = heuristicStitchGroups(listicle);
+assert.equal(listHeur.length, 1);
+assert.deepEqual(listHeur[0]!.fileIds, ["a", "b", "c"]);
+assert.equal(listHeur[0]!.kind, "stitch");
+
 console.log("stitch-group-plan-test: ok");
