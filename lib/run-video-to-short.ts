@@ -4,12 +4,22 @@ import {
   resolveStudioShortPipelineSettings,
   type StudioShortPipelineSettings,
 } from "@/lib/studio-short-pipeline-settings";
+import { audioTuningToFormFields } from "@/lib/studio-short-audio-tuning";
 import {
   pickEditorialDisplayCutsFromJobPoll,
   pickEditorialSkipFromJobPoll,
   pickEditorialSummaryFromJobPoll,
+  pickOutputRevisionFromJobPoll,
 } from "@/lib/short-job-poll-meta";
 import { mergeShortEditorialNotes } from "@/lib/video-to-short-proxy-form";
+import {
+  scriptEditsForReprocess,
+  type ScriptTextEditsPayload,
+} from "@/lib/short-script-edit";
+import {
+  sequenceClipsForReprocess,
+  type TimelineSequenceClip,
+} from "@/lib/short-sequence-types";
 import {
   removalsForReprocess,
   type TimelineRemoval,
@@ -248,6 +258,20 @@ export function editorialFieldsFromJobPoll(state: ShortJobPoll): {
   };
 }
 
+/** Pipeline-only fields — omit editorial/script overrides from a full options bag. */
+export function stripEditorialReprocessFields(
+  opts: StudioShortTextOptions
+): StudioShortTextOptions {
+  const {
+    timelineRemovals: _tr,
+    timelineSequenceClips: _ts,
+    scriptEdits: _se,
+    freezeDialogueTrims: _fd,
+    ...rest
+  } = opts;
+  return rest;
+}
+
 /** Text + pipeline fields sent to Video to Short (create or reprocess). */
 export type StudioShortTextOptions = {
   hook_instructions?: string;
@@ -257,12 +281,20 @@ export type StudioShortTextOptions = {
   pipeline?: StudioShortPipelineSettings | null;
   /** User-adjusted cuts from the timeline editor (skips LLM when set). */
   timelineRemovals?: TimelineRemoval[];
+  /** Reordered/trimmed keep-cards from the sequence timeline editor. */
+  timelineSequenceClips?: TimelineSequenceClip[];
+  /** Caption text overrides from the script text editor. */
+  scriptEdits?: ScriptTextEditsPayload | null;
+  /** Timeline tab: keep pause trims off when user disabled all dialogue cuts. */
+  freezeDialogueTrims?: boolean;
 };
 
 export type VideoToShortRunResult = {
   outputFile: File;
   /** Present when a real Short API job ran; use for `/reprocess`. */
   jobId: string | null;
+  /** From job `meta.output_revision` after a completed run (0 if unknown). */
+  outputRevision: number;
   /**
    * Human-readable summary of what the editorial pass did, surfaced from the
    * backend's final job state. e.g.:
@@ -285,16 +317,23 @@ export function getShortOutputFileName(originalName: string): string {
 }
 
 /** Same-origin proxy URL for streaming a completed Short job in `<video src>`. */
-export function shortJobDownloadApiUrl(jobId: string): string {
-  return clientApiPath(
+export function shortJobDownloadApiUrl(
+  jobId: string,
+  cacheBust?: number
+): string {
+  const base = clientApiPath(
     `/api/video-to-short/jobs/${encodeURIComponent(jobId)}/download`
   );
+  if (cacheBust != null && cacheBust > 0) {
+    return `${base}?v=${cacheBust}`;
+  }
+  return base;
 }
 
 /**
  * Same multipart fields for POST /api/jobs (create) and POST /api/jobs/:id/reprocess.
  * Keep `smart_editorial=true` in sync with the Vite “Smart editorial” path. Final
- * `editorial_notes` / `audio_mode` are merged in the Next proxy (`video-to-short-proxy-form`).
+ * `editorial_notes` are trimmed in `video-to-short-proxy-form` (user text only).
  */
 export function appendStudioShortPipelineFormFields(
   fd: FormData,
@@ -328,6 +367,11 @@ export function appendStudioShortPipelineFormFields(
   fd.append("reframe_max_crop_width_frac", String(r.max_crop_width_frac));
   fd.append("reframe_max_center_shift_frac", String(r.max_center_shift_frac));
   fd.append("reframe_max_size_step_frac", String(r.max_size_step_frac));
+  for (const [key, value] of Object.entries(
+    audioTuningToFormFields(pipe.audioTuning)
+  )) {
+    fd.append(key, value);
+  }
 }
 
 function buildCreateJobsFormData(
@@ -404,12 +448,15 @@ export async function fetchJobPollState(
  */
 async function waitForReprocessKickoff(
   jobId: string,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  baselineRevision = 0
 ): Promise<void> {
   const deadline = Date.now() + 120_000;
   for (;;) {
     if (Date.now() > deadline) {
-      return;
+      throw new Error(
+        "Re-process did not start within 2 minutes. Try again or check the Short server."
+      );
     }
 
     const state = await fetchJobPollState(jobId, onProgress);
@@ -426,6 +473,13 @@ async function waitForReprocessKickoff(
       return;
     }
 
+    const rev = pickOutputRevisionFromJobPoll(state as Record<string, unknown>);
+    if (rev > baselineRevision) {
+      throw new Error(
+        "Re-process completed before processing started — try again."
+      );
+    }
+
     await sleep(POLL_MS);
   }
 }
@@ -440,7 +494,8 @@ export async function pollVideoToShortJobUntilFile(
   jobId: string,
   outputFileName: string,
   onProgress?: (message: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  minOutputRevision = 0
 ): Promise<ShortPollResult> {
   const deadline = Date.now() + MAX_WAIT_MS;
   for (;;) {
@@ -464,7 +519,11 @@ export async function pollVideoToShortJobUntilFile(
       throw new Error(em);
     }
 
-    if (state.status === "completed") {
+    const rev = pickOutputRevisionFromJobPoll(state as Record<string, unknown>);
+    if (
+      state.status === "completed" &&
+      (minOutputRevision <= 0 || rev > minOutputRevision)
+    ) {
       const bust = `_=${Date.now()}`;
       const dlRes = await fetch(
         clientApiPath(
@@ -538,9 +597,13 @@ export async function reprocessVideoToShortJob(
   onProgress?: (message: string) => void
 ): Promise<VideoToShortRunResult> {
   const fd = new FormData();
-  // Timeline overrides are applied inside the smart-editorial path on the Short backend.
+  const scriptEditsJson = scriptEditsForReprocess(text.scriptEdits ?? null);
+  const hasTimelineOverride = text.timelineRemovals !== undefined;
+  const hasSequenceOverride = (text.timelineSequenceClips?.length ?? 0) > 0;
+  const hasScriptEdits = Boolean(scriptEditsJson);
+  // Timeline / script overrides are applied inside the smart-editorial path on the Short backend.
   const effectiveText: StudioShortTextOptions =
-    text.timelineRemovals !== undefined
+    hasTimelineOverride || hasSequenceOverride || hasScriptEdits
       ? {
           ...text,
           pipeline: {
@@ -550,12 +613,29 @@ export async function reprocessVideoToShortJob(
         }
       : text;
   appendStudioShortPipelineFormFields(fd, effectiveText);
-  if (text.timelineRemovals !== undefined) {
+  if (hasTimelineOverride) {
     fd.append(
       "timeline_removals_json",
-      removalsForReprocess(text.timelineRemovals)
+      removalsForReprocess(text.timelineRemovals!)
     );
   }
+  if (hasSequenceOverride) {
+    fd.append(
+      "timeline_sequence_json",
+      sequenceClipsForReprocess(text.timelineSequenceClips!)
+    );
+  }
+  if (scriptEditsJson) {
+    fd.append("script_edits_json", scriptEditsJson);
+  }
+  if (text.freezeDialogueTrims) {
+    fd.append("freeze_dialogue_trims", "true");
+  }
+
+  const baselineState = await fetchJobPollState(jobId, onProgress);
+  const baselineRevision = pickOutputRevisionFromJobPoll(
+    baselineState as Record<string, unknown>
+  );
 
   const res = await fetch(
     clientApiPath(
@@ -580,15 +660,20 @@ export async function reprocessVideoToShortJob(
     throw new Error(err);
   }
 
-  await waitForReprocessKickoff(jobId, onProgress);
+  await waitForReprocessKickoff(jobId, onProgress, baselineRevision);
   const { file, finalState } = await pollVideoToShortJobUntilFile(
     jobId,
     outputFileName,
-    onProgress
+    onProgress,
+    undefined,
+    baselineRevision
   );
   return {
     outputFile: file,
     jobId,
+    outputRevision: pickOutputRevisionFromJobPoll(
+      finalState as Record<string, unknown>
+    ),
     ...editorialFieldsFromJobPoll(finalState),
   };
 }
@@ -604,18 +689,84 @@ export async function runVideoToShortIfEnabled(
   text: StudioShortTextOptions = {},
   opts?: RunVideoToShortOptions
 ): Promise<VideoToShortRunResult> {
-  const signal = opts?.signal;
-  // Skip / disabled paths return the input unchanged and explicit nulls so the
-  // queue item doesn't display a stale "editorial summary" from a prior run.
-  const passthroughResult: VideoToShortRunResult = {
-    outputFile: video,
-    jobId: null,
-    editorialSummary: null,
-    editorialSkip: null,
-    editorialCuts: null,
-  };
+  const fd = buildCreateJobsFormData(video, text);
+  return createShortJobAndAwaitOutput(
+    "/api/video-to-short/jobs",
+    fd,
+    video,
+    onProgress,
+    opts
+  );
+}
+
+/**
+ * Server-side ingest, create-only: the backend pulls the video straight from
+ * the Google Drive inbox (POST /api/jobs/from-drive) in the background and
+ * this returns the job id within seconds. Returns null when the integration
+ * is disabled/skipped. The queue uses the returned jobId both to await the
+ * Short (resumeShortJobOutput) and as the shared `sourceJobId` so transcribe/
+ * carousel/image-post reuse the job's downloaded source instead of pulling
+ * from Drive again. `video` is a zero-byte placeholder carrying the filename.
+ */
+export async function createShortJobFromDrive(
+  driveFileId: string,
+  video: File,
+  text: StudioShortTextOptions = {},
+  opts?: RunVideoToShortOptions
+): Promise<{ jobId: string } | null> {
+  const fd = new FormData();
+  appendStudioShortPipelineFormFields(fd, text);
+  fd.append("file_id", driveFileId);
+  return createShortJob(
+    "/api/video-to-short/jobs/from-drive",
+    fd,
+    video,
+    opts?.signal
+  );
+}
+
+/** Await a previously-created Short job: poll to completion, download output. */
+export async function resumeShortJobOutput(
+  jobId: string,
+  video: File,
+  onProgress?: (message: string) => void,
+  opts?: RunVideoToShortOptions
+): Promise<VideoToShortRunResult> {
+  return awaitShortJobOutput(jobId, video, onProgress, opts?.signal);
+}
+
+async function createShortJobAndAwaitOutput(
+  createPath: string,
+  fd: FormData,
+  video: File,
+  onProgress?: (message: string) => void,
+  opts?: RunVideoToShortOptions
+): Promise<VideoToShortRunResult> {
+  const created = await createShortJob(createPath, fd, video, opts?.signal);
+  if (!created) {
+    return {
+      outputFile: video,
+      jobId: null,
+      outputRevision: 0,
+      editorialSummary: null,
+      editorialSkip: null,
+      editorialCuts: null,
+    };
+  }
+  return awaitShortJobOutput(created.jobId, video, onProgress, opts?.signal);
+}
+
+/** Create a Short job (upload or from-drive). Null = integration disabled/skipped. */
+async function createShortJob(
+  createPath: string,
+  fd: FormData,
+  video: File,
+  signal?: AbortSignal
+): Promise<{ jobId: string } | null> {
+  // Skip / disabled paths return null so callers fall back to the input file
+  // unchanged (no stale "editorial summary" from a prior run).
   if (process.env.NEXT_PUBLIC_SKIP_VIDEO_TO_SHORT === "1") {
-    return passthroughResult;
+    return null;
   }
 
   // Persist a correlation id BEFORE the upload starts. If the upload response
@@ -629,10 +780,9 @@ export async function runVideoToShortIfEnabled(
     sourceName: video.name,
   });
 
-  const fd = buildCreateJobsFormData(video, text);
   fd.append("client_correlation_id", correlationId);
   throwIfAborted(signal);
-  const createRes = await fetch(clientApiPath("/api/video-to-short/jobs"), {
+  const createRes = await fetch(clientApiPath(createPath), {
     method: "POST",
     body: fd,
     signal,
@@ -644,7 +794,7 @@ export async function runVideoToShortIfEnabled(
       const j = JSON.parse(createText) as { disabled?: boolean };
       if (j.disabled === true) {
         clearPreUploadCorrelation();
-        return passthroughResult;
+        return null;
       }
     } catch {
       /* fall through */
@@ -688,7 +838,15 @@ export async function runVideoToShortIfEnabled(
   // We have a real jobId now; the pre-upload correlation entry is no longer
   // useful — clear it so an orphaned-correlation-recovery doesn't fire.
   clearPreUploadCorrelation();
+  return { jobId };
+}
 
+async function awaitShortJobOutput(
+  jobId: string,
+  video: File,
+  onProgress?: (message: string) => void,
+  signal?: AbortSignal
+): Promise<VideoToShortRunResult> {
   try {
     const { file, finalState } = await pollVideoToShortJobUntilFile(
       jobId,
@@ -700,6 +858,9 @@ export async function runVideoToShortIfEnabled(
     return {
       outputFile: file,
       jobId,
+      outputRevision: pickOutputRevisionFromJobPoll(
+        finalState as Record<string, unknown>
+      ),
       ...editorialFieldsFromJobPoll(finalState),
     };
   } catch (err) {

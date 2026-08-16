@@ -125,3 +125,10 @@ export function pickEditorialDisplayCutsFromJobPoll(
 export function pickAudioModeFromJobPoll(state: ShortJobPollLike): string | null {
   return pickString(state, "audio_mode", "audioMode");
 }
+
+/** Bumps after each completed encode — use to bust stale CDN / browser previews. */
+export function pickOutputRevisionFromJobPoll(state: ShortJobPollLike): number {
+  const raw = pickDefined(state, "output_revision", "outputRevision");
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}

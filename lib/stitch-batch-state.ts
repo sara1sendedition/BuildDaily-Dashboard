@@ -13,9 +13,10 @@
  *   2. Resume polling each not-yet-terminal row.
  *   3. Show "We saw N stitched videos from <time> — resume?" on reload.
  *
- * State is keyed under one localStorage key with a single batch at a time —
- * a new "Process" click overwrites the previous batch. TTL is 24h so stale
- * state doesn't haunt the UI forever.
+ * State is keyed under one localStorage key with a single batch at a time.
+ * New "Process" clicks while work is in flight append rows onto the current
+ * batch (see ``appendStitchBatchRows``). TTL is 24h so stale state doesn't
+ * haunt the UI forever.
  */
 
 const LS_KEY = "stitch:batchState";
@@ -34,8 +35,7 @@ export type StitchRowState = {
   /** Stable client-generated id; sent to the server as ``client_correlation_id``.
    *  Lets the client recover the server-side jobId after upload-response loss. */
   correlationId: string;
-  /** Server-side job id, set after the upload response comes back. Until then,
-   *  the only way to find the job server-side is via correlationId lookup. */
+  /** Video-to-Short stitch job id (multi-clip concat). Null for single Drive/URL. */
   jobId: string | null;
   status: StitchRowStatus;
   /** Free-text per-row instructions, mirrored from the UI so the recovery
@@ -48,6 +48,14 @@ export type StitchRowState = {
   /** Filenames of the input clips, ONLY for surfacing in the recovery UI —
    *  we can't reconstruct File objects from these. */
   clipNames: string[];
+  /** Single Drive inbox id — durable Multiplier ingest without a stitch job. */
+  driveFileId?: string;
+  /** Bunny/CDN source URL for a single device clip (no stitch). */
+  sourceVideoUrl?: string;
+  /** Hub ProcessingJob id once Multiplier enqueue succeeds. */
+  processingJobId?: string;
+  /** Stable Multiplier queue row id so resume cannot mint a duplicate. */
+  queueItemId?: string;
 };
 
 export type StitchBatchState = {
@@ -56,11 +64,6 @@ export type StitchBatchState = {
   /** ms-since-epoch when the batch was created (used for TTL + "from <time>"). */
   createdAt: number;
   rows: StitchRowState[];
-  /**
-   * Where to send finished MP4s after stitch/resume. Persisted so a reload
-   * does not silently reset Video Editor → Multiplier.
-   */
-  destination?: "multiplier" | "video-editor";
 };
 
 function safeLocalStorage(): Storage | null {
@@ -124,13 +127,7 @@ export function readStitchBatch(): StitchBatchState | null {
       rows.push(r as StitchRowState);
     }
   }
-  return {
-    batchId: parsed.batchId,
-    createdAt: parsed.createdAt,
-    rows,
-    destination:
-      parsed.destination === "video-editor" ? "video-editor" : "multiplier",
-  };
+  return { batchId: parsed.batchId, createdAt: parsed.createdAt, rows };
 }
 
 export function writeStitchBatch(state: StitchBatchState): void {
@@ -156,6 +153,29 @@ export function patchStitchRow(
   const next = {
     ...cur,
     rows: cur.rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)),
+  };
+  writeStitchBatch(next);
+  return next;
+}
+
+/** Append new row states onto the current batch (or create one). */
+export function appendStitchBatchRows(
+  rows: StitchRowState[],
+  opts?: { batchId?: string },
+): StitchBatchState {
+  const cur = readStitchBatch();
+  if (!cur) {
+    const next: StitchBatchState = {
+      batchId: opts?.batchId ?? generateStitchId(),
+      createdAt: Date.now(),
+      rows,
+    };
+    writeStitchBatch(next);
+    return next;
+  }
+  const next: StitchBatchState = {
+    ...cur,
+    rows: [...cur.rows, ...rows],
   };
   writeStitchBatch(next);
   return next;

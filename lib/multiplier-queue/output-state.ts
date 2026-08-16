@@ -26,16 +26,17 @@ export type MultiplierOutputsState = Partial<
   Record<MultiplierOutputKey, MultiplierOutputState>
 >;
 
+/** Worker/client patch — any subset of an output's fields. */
+export type MultiplierOutputPatch = Partial<MultiplierOutputState>;
+export type MultiplierOutputsPatch = Partial<
+  Record<MultiplierOutputKey, MultiplierOutputPatch>
+>;
+
 export const MULTIPLIER_OUTPUT_KEYS: MultiplierOutputKey[] = [
   "carousel",
   "photo",
   "short",
 ];
-
-export type MultiplierOutputPatch = Partial<MultiplierOutputState>;
-export type MultiplierOutputsPatch = Partial<
-  Record<MultiplierOutputKey, MultiplierOutputPatch>
->;
 
 export function emptyOutputState(
   status: OutputProcessStatus = "pending",
@@ -91,6 +92,28 @@ export function mergeOutputsState(
     base[key] = merged;
   }
   return base;
+}
+
+/** Overlay in-session Ready toggles so a stale Hub poll cannot un-highlight buttons. */
+export function applyLocalReadyOverrides(
+  outputs: MultiplierOutputsState | undefined,
+  overrides:
+    | Partial<Record<MultiplierOutputKey, boolean>>
+    | undefined,
+): MultiplierOutputsState | undefined {
+  if (!overrides) return outputs;
+  const next: MultiplierOutputsState = { ...(outputs ?? {}) };
+  let changed = false;
+  for (const key of MULTIPLIER_OUTPUT_KEYS) {
+    const ready = overrides[key];
+    if (ready === undefined) continue;
+    changed = true;
+    next[key] = {
+      ...(next[key] ?? emptyOutputState("done")),
+      readyToSchedule: ready,
+    };
+  }
+  return changed ? next : outputs;
 }
 
 /** Aggregate queue row status from per-output states. */

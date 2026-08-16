@@ -461,7 +461,7 @@ type CarouselWorkspaceValue = {
       /** Stitch job ids for server-side ingest (parallel to `files`). */
       stitchJobIdsByIndex?: Array<string | undefined>;
     }
-  ) => void;
+  ) => string[];
   file: File | null;
   /** Short pipeline output for the active queue row, if any (not used for carousel/image). */
   shortOutputFile: File | null;
@@ -3566,12 +3566,12 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
             "None of the selected files look like supported videos (e.g. .mp4, .mov, .webm). If this is a video, try renaming with a standard extension or export as MP4."
           );
         }
-        return;
+        return [];
       }
       const o = withEffectiveStudioOutputs(studioOutputsRef.current);
       if (!o.carousel && !o.imagePost && !o.xPost && !o.reelShort) {
         setError("Choose at least one output format before uploading.");
-        return;
+        return [];
       }
       setError(null);
       const notesByIndex = opts?.aiInstructionsByIndex ?? [];
@@ -3593,7 +3593,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
         uniqueDriveIds.push(driveIdsByIndex[idx]);
         uniqueStitchIds.push(stitchIdsByIndex[idx]);
       });
-      if (uniqueList.length === 0) return;
+      if (uniqueList.length === 0) return [];
       const newItems: VideoQueueItem[] = uniqueList.map((f, idx) => ({
         id: crypto.randomUUID(),
         file: f,
@@ -3624,6 +3624,7 @@ export function CarouselWorkspaceProvider({ children }: { children: ReactNode })
       selectQueueItem(newItems[0]!.id);
       // Do not set global `loading` — keep Add unlocked while server jobs run.
       drainDurableEnqueue();
+      return newItems.map((item) => item.id);
     },
     [drainDurableEnqueue, selectQueueItem, setError]
   );

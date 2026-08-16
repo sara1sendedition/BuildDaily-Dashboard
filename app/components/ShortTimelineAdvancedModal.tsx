@@ -21,7 +21,7 @@ type Props = {
   busy: boolean;
   outputPreviewUrl?: string | null;
   buildReprocessOptions: () => StudioShortTextOptions;
-  onReprocess: (opts: StudioShortTextOptions) => Promise<void>;
+  onReprocess: (opts: StudioShortTextOptions) => Promise<boolean>;
 };
 
 function emptyTimeline(sourceDurationSec: number): TimelineData {

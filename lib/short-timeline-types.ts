@@ -19,11 +19,22 @@ export type TimelineKeepSpan = {
   duration_sec: number;
 };
 
+export type TimelineSequenceClipMeta = {
+  id: string;
+  source_start_sec: number;
+  source_end_sec: number;
+  duration_sec: number;
+  label?: string;
+  snippet?: string;
+  role?: string;
+};
+
 export type TimelineData = {
   source_duration_sec: number;
   output_duration_sec: number;
   removals: TimelineRemoval[];
   keep_spans: TimelineKeepSpan[];
+  sequence_clips?: TimelineSequenceClipMeta[];
 };
 
 export function formatTimelineTime(sec: number): string {
@@ -83,17 +94,98 @@ export function parseTimelineFromMeta(
     });
   }
   removals.sort((a, b) => a.start_sec - b.start_sec);
+  const metaDur = Number(
+    meta.source_duration_sec ??
+      meta.source_input_duration_s ??
+      meta.duration_s ??
+      0
+  );
   const maxEnd = removals.reduce((m, r) => Math.max(m, r.end_sec), 0);
   return {
-    source_duration_sec: maxEnd > 0 ? maxEnd + 1 : 60,
+    source_duration_sec:
+      metaDur > 0 ? metaDur : maxEnd > 0 ? maxEnd + 1 : 60,
     output_duration_sec: 0,
     removals,
     keep_spans: [],
   };
 }
 
+function gapsFromKeepSpans(
+  sourceDurationSec: number,
+  keepSpans: TimelineKeepSpan[]
+): Array<{ start_sec: number; end_sec: number }> {
+  const total = Math.max(0, sourceDurationSec);
+  if (total <= 0) return [];
+  const keeps = [...keepSpans]
+    .filter((k) => k.end_sec > k.start_sec)
+    .sort((a, b) => a.start_sec - b.start_sec);
+  if (keeps.length === 0) return [{ start_sec: 0, end_sec: total }];
+  const gaps: Array<{ start_sec: number; end_sec: number }> = [];
+  let cursor = 0;
+  for (const k of keeps) {
+    if (k.start_sec > cursor + 0.02) {
+      gaps.push({ start_sec: cursor, end_sec: k.start_sec });
+    }
+    cursor = Math.max(cursor, k.end_sec);
+  }
+  if (cursor < total - 0.02) {
+    gaps.push({ start_sec: cursor, end_sec: total });
+  }
+  return gaps;
+}
+
+/** Add removal rows for encode gaps missing from meta (e.g. micro-keep pruning). */
+export function reconcileTimelineRemovals(timeline: TimelineData): TimelineData {
+  const keeps = timeline.keep_spans ?? [];
+  const source = timeline.source_duration_sec;
+  if (!keeps.length || source <= 0) return timeline;
+
+  const removals = timeline.removals.map((r) => normalizeRemoval({ ...r }));
+  const gapCovered = (t0: number, t1: number) => {
+    const gapLen = t1 - t0;
+    if (gapLen <= 1e-6) return true;
+    const overlaps = removals
+      .map((r) => ({
+        start: Math.max(t0, r.start_sec),
+        end: Math.min(t1, r.end_sec),
+      }))
+      .filter((iv) => iv.end > iv.start + 1e-6)
+      .sort((a, b) => a.start - b.start);
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const iv of overlaps) {
+      const last = merged[merged.length - 1];
+      if (!last || iv.start > last.end + 1e-6) {
+        merged.push({ ...iv });
+      } else {
+        last.end = Math.max(last.end, iv.end);
+      }
+    }
+    const covered = merged.reduce((sum, iv) => sum + (iv.end - iv.start), 0);
+    return covered >= gapLen - 0.05;
+  };
+
+  for (const gap of gapsFromKeepSpans(source, keeps)) {
+    if (gapCovered(gap.start_sec, gap.end_sec)) continue;
+    removals.push(
+      normalizeRemoval({
+        id: `d-${gap.start_sec.toFixed(2)}-${gap.end_sec.toFixed(2)}`,
+        kind: "dialogue",
+        start_sec: gap.start_sec,
+        end_sec: gap.end_sec,
+        duration_sec: gap.end_sec - gap.start_sec,
+        reason: "Trimmed segment (see Timeline tab)",
+        snippet: "",
+        adjustable: true,
+        enabled: true,
+      })
+    );
+  }
+  removals.sort((a, b) => a.start_sec - b.start_sec);
+  return { ...timeline, removals };
+}
+
 function hydrateTimeline(data: TimelineData): TimelineData {
-  return {
+  const hydrated: TimelineData = {
     ...data,
     removals: (data.removals ?? []).map((r) =>
       normalizeRemoval({
@@ -104,6 +196,7 @@ function hydrateTimeline(data: TimelineData): TimelineData {
     ),
     keep_spans: data.keep_spans ?? [],
   };
+  return reconcileTimelineRemovals(hydrated);
 }
 
 export function roundTimelineSec(sec: number): number {
@@ -181,5 +274,27 @@ export function removalsForReprocess(removals: TimelineRemoval[]): string {
         reason: r.reason,
         snippet: r.snippet,
       }))
+  );
+}
+
+/** Script word toggles only change editorial cuts — omit dialogue trims so the backend recomputes pauses/silence for the new layout. */
+export function editorialRemovalsOnly(
+  removals: TimelineRemoval[]
+): TimelineRemoval[] {
+  return removals.filter((r) => r.kind === "editorial");
+}
+
+/** Stable key for resetting local editor state when server baseline changes. */
+export function timelineRemovalsFingerprint(removals: TimelineRemoval[]): string {
+  return JSON.stringify(
+    removals
+      .map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        start: r.start_sec,
+        end: r.end_sec,
+        enabled: r.enabled,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id))
   );
 }

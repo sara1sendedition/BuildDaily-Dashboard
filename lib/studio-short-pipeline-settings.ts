@@ -8,6 +8,12 @@ import {
   parseShortAudioMode,
   type ShortAudioMode,
 } from "@/lib/short-audio-mode";
+import {
+  parseStudioShortAudioTuning,
+  resolveStudioShortAudioTuning,
+  STUDIO_SHORT_AUDIO_TUNING_DEFAULTS,
+  type StudioShortAudioTuning,
+} from "@/lib/studio-short-audio-tuning";
 
 export type { ShortAudioMode };
 
@@ -26,11 +32,15 @@ export type StudioShortPipelineSettings = {
   /** When true (default), uses lighter/faster audio for iteration. Turn off in Advanced for production DeepFilter. */
   devMode: boolean;
   audioMode: ShortAudioMode;
+  /** Per-job audio polish / denoise intensity (Advanced editor sliders). */
+  audioTuning: StudioShortAudioTuning;
   smartEditorial: boolean;
   bookendZoom: boolean;
   smartReframe: boolean;
   reframe: StudioShortReframeTuning;
 };
+
+export type { StudioShortAudioTuning };
 
 /** Audio mode applied while {@link StudioShortPipelineSettings.devMode} is on. */
 export const DEV_MODE_SHORT_AUDIO_MODE: ShortAudioMode = "fast";
@@ -49,6 +59,7 @@ export const STUDIO_SHORT_REFRAME_DEFAULTS: StudioShortReframeTuning = {
 export const STUDIO_SHORT_PIPELINE_DEFAULTS: StudioShortPipelineSettings = {
   devMode: true,
   audioMode: CODE_DEFAULT_SHORT_AUDIO_MODE,
+  audioTuning: { ...STUDIO_SHORT_AUDIO_TUNING_DEFAULTS },
   smartEditorial: true,
   bookendZoom: true,
   smartReframe: true,
@@ -62,7 +73,7 @@ const LEGACY_PIPELINE_SETTINGS_STORAGE_KEY =
   "v2c-short-pipeline-settings-v1";
 
 /** Bump when stored shape or migration rules change. */
-export const PIPELINE_SETTINGS_SCHEMA_VERSION = 3;
+export const PIPELINE_SETTINGS_SCHEMA_VERSION = 4;
 
 function clamp(n: number, min: number, max: number): number {
   if (!Number.isFinite(n)) return min;
@@ -94,9 +105,14 @@ function parseStoredPipeline(raw: unknown): StudioShortPipelineSettings | null {
       : {};
   const d = STUDIO_SHORT_REFRAME_DEFAULTS;
 
+  const parsedAudioTuning =
+    parseStudioShortAudioTuning(o.audioTuning) ??
+    STUDIO_SHORT_AUDIO_TUNING_DEFAULTS;
+
   return {
     devMode: o.devMode !== false,
     audioMode: audio,
+    audioTuning: parsedAudioTuning,
     smartEditorial: o.smartEditorial !== false,
     bookendZoom: o.bookendZoom !== false,
     smartReframe: o.smartReframe !== false,
@@ -185,6 +201,7 @@ function loadLegacyV1Settings(): StudioShortPipelineSettings | null {
 export function getStudioShortPipelineSettingsFromStorage(): StudioShortPipelineSettings {
   const fallback = {
     ...STUDIO_SHORT_PIPELINE_DEFAULTS,
+    audioTuning: { ...STUDIO_SHORT_AUDIO_TUNING_DEFAULTS },
     reframe: { ...STUDIO_SHORT_REFRAME_DEFAULTS },
   };
   if (typeof window === "undefined") return fallback;
@@ -238,7 +255,11 @@ export function resolveStudioShortPipelineSettings(
 ): StudioShortPipelineSettings {
   const base = STUDIO_SHORT_PIPELINE_DEFAULTS;
   if (!partial) {
-    return { ...base, reframe: { ...base.reframe } };
+    return {
+      ...base,
+      audioTuning: { ...base.audioTuning },
+      reframe: { ...base.reframe },
+    };
   }
   const audioMode =
     parseShortAudioMode(partial.audioMode) ?? base.audioMode;
@@ -246,6 +267,7 @@ export function resolveStudioShortPipelineSettings(
     devMode:
       typeof partial.devMode === "boolean" ? partial.devMode : base.devMode,
     audioMode,
+    audioTuning: resolveStudioShortAudioTuning(partial.audioTuning),
     smartEditorial:
       typeof partial.smartEditorial === "boolean"
         ? partial.smartEditorial

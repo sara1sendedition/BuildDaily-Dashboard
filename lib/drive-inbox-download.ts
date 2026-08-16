@@ -13,7 +13,7 @@ function filenameFromDisposition(header: string | null, fallback: string): strin
   return fallback;
 }
 
-function videoMimeFromName(name: string): string {
+export function videoMimeFromName(name: string): string {
   const lower = name.toLowerCase();
   if (lower.endsWith(".mov")) return "video/quicktime";
   if (lower.endsWith(".webm")) return "video/webm";

@@ -19,7 +19,7 @@ type ShortEditPanelProps = {
   shortJobId: string | null;
   busy: boolean;
   shortPreviewUrl?: string | null;
-  onReprocess: (opts: StudioShortTextOptions) => Promise<void>;
+  onReprocess: (opts: StudioShortTextOptions) => Promise<boolean>;
 };
 
 export function ShortEditPanel({
