@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { denyIfNotInternalAuthorized } from "@/lib/internal-auth";
 import {
@@ -6,8 +7,28 @@ import {
   isConnectionCryptoConfigured,
 } from "@/lib/crypto/connection-tokens";
 import { socialConnectionPublicSelect } from "@/lib/social-connection-public";
+import { errors } from "@/app/api/v1/_lib/responses";
 
 export const runtime = "nodejs";
+
+function persistFailureMessage(e: unknown): string {
+  if (e instanceof Prisma.PrismaClientKnownRequestError) {
+    if (e.code === "P2002") {
+      const target = Array.isArray(e.meta?.target)
+        ? (e.meta.target as string[]).join(", ")
+        : "unique field";
+      return `Already exists (${target}).`;
+    }
+    if (e.code === "P2003") {
+      return "Hub user row is missing. Open Calendar once while signed in, then connect TikTok again.";
+    }
+    if (e.code === "P2022") {
+      return `Hub database is missing a column (${String(e.meta?.column ?? "unknown")}). Run prisma migrate deploy on the Hub.`;
+    }
+    return `${e.code}: ${e.message}`;
+  }
+  return e instanceof Error ? e.message : "Unknown error";
+}
 
 const PLATFORMS = [
   "linkedin",
@@ -134,6 +155,12 @@ export async function POST(request: Request) {
   const tokenExpiresAt = tokenExpiresAtProvided
     ? new Date(body.tokenExpiresAt as string)
     : undefined;
+  if (tokenExpiresAtProvided && tokenExpiresAt && Number.isNaN(tokenExpiresAt.getTime())) {
+    return NextResponse.json(
+      { error: "tokenExpiresAt must be a valid ISO timestamp." },
+      { status: 400 },
+    );
+  }
   const scopesProvided = Array.isArray(body.scopes);
   const scopes = scopesProvided
     ? (body.scopes as unknown[]).filter(
@@ -141,77 +168,89 @@ export async function POST(request: Request) {
       )
     : undefined;
 
-  const existingUser = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true },
-  });
-  if (!existingUser) {
-    if (!email) {
-      return NextResponse.json(
-        { error: "email is required to create a new user." },
-        { status: 400 },
+  try {
+    await prisma.user.upsert({
+      where: { id: userId },
+      update: {},
+      create: {
+        id: userId,
+        email: email || `${userId}@users.noreply.builddaily.app`,
+        membershipType: "free",
+      },
+    });
+  } catch (e) {
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === "P2002" &&
+      email
+    ) {
+      return errors.conflict(
+        "This email is already on the Hub under a different user id. Open Calendar while signed in, then retry TikTok.",
       );
     }
-    await prisma.user.create({
-      data: { id: userId, email, membershipType: "free" },
-    });
+    console.error("[social-connections/upsert] user persist failed:", e);
+    return errors.internal(persistFailureMessage(e));
   }
 
-  const existingConn = await prisma.socialConnection.findUnique({
-    where: { userId_platform: { userId, platform } },
-    select: { id: true },
-  });
+  try {
+    const existingConn = await prisma.socialConnection.findUnique({
+      where: { userId_platform: { userId, platform } },
+      select: { id: true },
+    });
 
-  if (existingConn) {
-    const updateData: {
-      accessTokenEnc?: string;
-      refreshTokenEnc?: string | null;
-      tokenExpiresAt?: Date | null;
-      scopes?: string[];
-      externalUserId?: string | null;
-      externalUsername?: string | null;
-      externalDisplayName?: string | null;
-      externalAvatarUrl?: string | null;
-    } = { ...profilePatch };
-    if (accessToken) {
-      updateData.accessTokenEnc = encryptToken(accessToken);
-    }
-    if (refreshToken) {
-      updateData.refreshTokenEnc = encryptToken(refreshToken);
-    }
-    if (tokenExpiresAtProvided) {
-      updateData.tokenExpiresAt = tokenExpiresAt ?? null;
-    }
-    if (scopesProvided && scopes) {
-      updateData.scopes = scopes;
+    if (existingConn) {
+      const updateData: {
+        accessTokenEnc?: string;
+        refreshTokenEnc?: string | null;
+        tokenExpiresAt?: Date | null;
+        scopes?: string[];
+        externalUserId?: string | null;
+        externalUsername?: string | null;
+        externalDisplayName?: string | null;
+        externalAvatarUrl?: string | null;
+      } = { ...profilePatch };
+      if (accessToken) {
+        updateData.accessTokenEnc = encryptToken(accessToken);
+      }
+      if (refreshToken) {
+        updateData.refreshTokenEnc = encryptToken(refreshToken);
+      }
+      if (tokenExpiresAtProvided) {
+        updateData.tokenExpiresAt = tokenExpiresAt ?? null;
+      }
+      if (scopesProvided && scopes) {
+        updateData.scopes = scopes;
+      }
+
+      const row = await prisma.socialConnection.update({
+        where: { id: existingConn.id },
+        data: updateData,
+        select: socialConnectionPublicSelect,
+      });
+      return NextResponse.json({ data: row });
     }
 
-    const row = await prisma.socialConnection.update({
-      where: { id: existingConn.id },
-      data: updateData,
+    const row = await prisma.socialConnection.create({
+      data: {
+        userId,
+        platform,
+        accessTokenEnc: accessToken
+          ? encryptToken(accessToken)
+          : encryptToken(""),
+        refreshTokenEnc: refreshToken ? encryptToken(refreshToken) : null,
+        tokenExpiresAt: tokenExpiresAt ?? null,
+        scopes: scopes ?? [],
+        externalUserId: profilePatch.externalUserId ?? null,
+        externalUsername: profilePatch.externalUsername ?? null,
+        externalDisplayName: profilePatch.externalDisplayName ?? null,
+        externalAvatarUrl: profilePatch.externalAvatarUrl ?? null,
+      },
       select: socialConnectionPublicSelect,
     });
+
     return NextResponse.json({ data: row });
+  } catch (e) {
+    console.error("[social-connections/upsert] connection persist failed:", e);
+    return errors.internal(persistFailureMessage(e));
   }
-
-  // Create — access column is non-null; use provided access or empty placeholder.
-  const row = await prisma.socialConnection.create({
-    data: {
-      userId,
-      platform,
-      accessTokenEnc: accessToken
-        ? encryptToken(accessToken)
-        : encryptToken(""),
-      refreshTokenEnc: refreshToken ? encryptToken(refreshToken) : null,
-      tokenExpiresAt: tokenExpiresAt ?? null,
-      scopes: scopes ?? [],
-      externalUserId: profilePatch.externalUserId ?? null,
-      externalUsername: profilePatch.externalUsername ?? null,
-      externalDisplayName: profilePatch.externalDisplayName ?? null,
-      externalAvatarUrl: profilePatch.externalAvatarUrl ?? null,
-    },
-    select: socialConnectionPublicSelect,
-  });
-
-  return NextResponse.json({ data: row });
 }
